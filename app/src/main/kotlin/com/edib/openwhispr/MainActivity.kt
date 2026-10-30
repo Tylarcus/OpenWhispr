@@ -543,8 +543,14 @@ class MainActivity : AppCompatActivity() {
         ).coerceAtLeast(0)
         var typingBehaviorRowSubtitle: TextView? = null
         val typingBehaviorRow = settingsRow(
-            "When typing without dictation",
-            typingActionNames[typingActionIndex()]
+            "When typing without dictation · tap to choose",
+            typingActionNames[typingActionIndex()],
+            widget = TextView(this).apply {
+                text = "▾"
+                textSize = 24f
+                setTextColor(attrColor(android.R.attr.textColorSecondary))
+                contentDescription = "Choose typing behavior"
+            }
         ) {
             android.app.AlertDialog.Builder(this)
                 .setTitle("When typing without dictation")
@@ -560,6 +566,112 @@ class MainActivity : AppCompatActivity() {
         // Subtitle can be updated immediately without rebuilding the settings screen.
         typingBehaviorRowSubtitle = typingBehaviorRow.findViewWithTag("subtitle")
         settingsContainer.addView(group().apply { addView(typingBehaviorRow) })
+
+        settingsContainer.addView(sectionHeader("Numeric and PIN keypads"))
+        settingsContainer.addView(TextView(this).apply {
+            text = "Gboard changes its layout for number fields and PINs. " +
+                "By default the microphone hides on numeric keypads. " +
+                "Password/PIN fields remain hidden when idle for privacy. " +
+                "Some custom PIN apps don't expose their input type."
+            textSize = 13f
+            setTextColor(attrColor(android.R.attr.textColorSecondary))
+            setPadding(dp(24), dp(6), dp(24), dp(14))
+        })
+        val numericOptions = arrayOf(
+            "Hide microphone on numeric keypads",
+            "Use the normal text keyboard positions",
+            "Use separately saved numeric positions"
+        )
+        val numericValues = arrayOf("hide", "shared", "separate")
+        fun numericIndex(): Int = numericValues.indexOf(
+            prefs().getString("numeric_keyboard_behavior", "hide")
+        ).coerceAtLeast(0)
+        var numericSubtitle: TextView? = null
+        val numericBehaviorRow = settingsRow(
+            "When a number keypad opens · tap to choose",
+            numericOptions[numericIndex()],
+            widget = TextView(this).apply {
+                text = "▾"
+                textSize = 24f
+                setTextColor(attrColor(android.R.attr.textColorSecondary))
+                contentDescription = "Choose numeric keyboard behavior"
+            }
+        ) {
+            android.app.AlertDialog.Builder(this)
+                .setTitle("When Gboard shows a numeric keypad")
+                .setSingleChoiceItems(numericOptions, numericIndex()) { dialog, selected ->
+                    prefs().edit().putString(
+                        "numeric_keyboard_behavior", numericValues[selected]
+                    ).apply()
+                    numericSubtitle?.text = numericOptions[selected]
+                    WhisperAccessibilityService.instance?.refreshPositionPreferences()
+                    dialog.dismiss()
+                }
+                .setNegativeButton("Cancel", null)
+                .show()
+        }
+        numericSubtitle = numericBehaviorRow.findViewWithTag("subtitle")
+        settingsContainer.addView(group().apply { addView(numericBehaviorRow) })
+        settingsContainer.addView(group().apply {
+            addView(settingsRow(
+                "Set numeric position 1",
+                "Normal idle microphone location on a number pad"
+            ) { promptPlacementCalibration(
+                MicrophoneMode.KEYBOARD, markLocked, KeyboardLayoutProfile.NUMBER
+            ) })
+            addView(settingsRow(
+                "Set numeric position 2",
+                "Floating location while dictating with the number pad closed"
+            ) { promptPlacementCalibration(
+                MicrophoneMode.FLOATING, markLocked, KeyboardLayoutProfile.NUMBER
+            ) })
+            addView(settingsRow(
+                "Set numeric position 3",
+                "Dictating while the numeric keyboard remains open"
+            ) { promptPlacementCalibration(
+                MicrophoneMode.RECORDING_DOCK, markLocked, KeyboardLayoutProfile.NUMBER
+            ) })
+            addView(settingsRow(
+                "Set numeric position 4",
+                "Typing-detector alternative location with numeric keyboard"
+            ) { promptPlacementCalibration(
+                MicrophoneMode.TYPING_DOCK, markLocked, KeyboardLayoutProfile.NUMBER
+            ) })
+        })
+
+        settingsContainer.addView(sectionHeader("Dragging behavior"))
+        val dragOptions = arrayOf(
+            "Move temporarily (return home after mode change)",
+            "Move and update saved home (when unlocked)"
+        )
+        val dragValues = arrayOf("temporary", "save")
+        fun dragIndex(): Int = dragValues.indexOf(
+            prefs().getString("drag_behavior", "temporary")
+        ).coerceAtLeast(0)
+        var dragSubtitle: TextView? = null
+        val dragBehaviorRow = settingsRow(
+            "When dragging a microphone · tap to choose",
+            dragOptions[dragIndex()],
+            widget = TextView(this).apply {
+                text = "▾"
+                textSize = 24f
+                setTextColor(attrColor(android.R.attr.textColorSecondary))
+                contentDescription = "Choose microphone drag behavior"
+            }
+        ) {
+            android.app.AlertDialog.Builder(this)
+                .setTitle("Dragging microphone")
+                .setSingleChoiceItems(dragOptions, dragIndex()) { dialog, selected ->
+                    prefs().edit().putString("drag_behavior", dragValues[selected]).apply()
+                    dragSubtitle?.text = dragOptions[selected]
+                    dialog.dismiss()
+                }
+                .setNegativeButton("Cancel", null)
+                .show()
+        }
+        dragSubtitle = dragBehaviorRow.findViewWithTag("subtitle")
+        settingsContainer.addView(group().apply { addView(dragBehaviorRow) })
+
 
         settingsContainer.addView(TextView(this).apply {
             text = "Drag the microphone into the red Close target at the bottom to dismiss it. " +
@@ -1669,18 +1781,24 @@ class MainActivity : AppCompatActivity() {
     )
     /** Guided real-keyboard placement; the overlay remains above this dialog.
      * Calibration state is temporary, and V4's saved coordinates are preserved. */
-    private fun promptPlacementCalibration(mode: MicrophoneMode, afterSave: () -> Unit) {
+    private fun promptPlacementCalibration(
+        mode: MicrophoneMode,
+        afterSave: () -> Unit,
+        layout: KeyboardLayoutProfile = KeyboardLayoutProfile.TEXT
+    ) {
         val service = WhisperAccessibilityService.instance
         if (service == null) {
             toast("Enable OpenWhispr's accessibility service first.")
             return
         }
-        val title = when (mode) {
+        val modeTitle = when (mode) {
             MicrophoneMode.KEYBOARD -> "Keyboard-open location"
             MicrophoneMode.FLOATING -> "Keyboard-closed location"
             MicrophoneMode.RECORDING_DOCK -> "Keyboard busy / recording"
             MicrophoneMode.TYPING_DOCK -> "Position 4 — typing"
         }
+        val title = if (layout == KeyboardLayoutProfile.NUMBER)
+            "Number pad: $modeTitle" else modeTitle
         val panel = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(20), dp(12), dp(20), dp(12))
@@ -1708,7 +1826,9 @@ class MainActivity : AppCompatActivity() {
         val editor = if (mode != MicrophoneMode.FLOATING) EditText(this).apply {
             hint = "Tap here to open Gboard and test typing"
             setSingleLine(true)
-            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_CAP_SENTENCES
+            inputType = if (layout == KeyboardLayoutProfile.NUMBER)
+                InputType.TYPE_CLASS_NUMBER or InputType.TYPE_NUMBER_FLAG_DECIMAL
+            else InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_CAP_SENTENCES
         } else null
         if (editor != null) panel.addView(editor)
         val dialog = android.app.AlertDialog.Builder(this)
@@ -1721,7 +1841,7 @@ class MainActivity : AppCompatActivity() {
             .setNegativeButton("Done", null)
             .create()
         dialog.setOnShowListener {
-            service.startPositionCalibration(mode)
+            service.startPositionCalibration(mode, layout)
             if (editor != null) {
                 editor.requestFocus()
                 editor.post {
