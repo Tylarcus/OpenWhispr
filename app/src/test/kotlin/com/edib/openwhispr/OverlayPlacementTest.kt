@@ -9,16 +9,16 @@ class OverlayPlacementTest {
         // The keyboard starts at y=1450, but an idle mic is allowed at y=250.
         val saved = OverlayPlacement.remember(640, 250, 1080, 2340, 48)
         val result = OverlayPlacement.restore(saved, 1080, 2340, 48, 8)
-        assertEquals(640, result.x, 1)
-        assertEquals(250, result.y, 1)
+        assertTrue(kotlin.math.abs(640 - result.x) <= 1)
+        assertTrue(kotlin.math.abs(250 - result.y) <= 1)
         assertTrue(result.y < 1450)
     }
 
     @Test fun coordinatesDoNotDependOnKeyboardTop() {
         val saved = OverlayPlacement.remember(900, 1200, 1080, 2340, 56)
         val restored = OverlayPlacement.restore(saved, 1080, 2340, 56, 8)
-        assertEquals(900, restored.x, 1)
-        assertEquals(1200, restored.y, 1)
+        assertTrue(kotlin.math.abs(900 - restored.x) <= 1)
+        assertTrue(kotlin.math.abs(1200 - restored.y) <= 1)
     }
 
     @Test fun resizedOverlayStaysOnScreen() {
