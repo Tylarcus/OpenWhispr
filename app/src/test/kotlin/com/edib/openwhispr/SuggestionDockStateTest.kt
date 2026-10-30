@@ -26,6 +26,27 @@ class SuggestionDockStateTest {
         state.onEditorChanged()
         assertFalse(state.shouldUseAlternativePosition)
     }
+    @Test fun toolbarReturnsMicWithoutClosingKeyboard() {
+        val state = SuggestionDockState()
+        state.onEdit()
+        assertTrue(state.shouldUseAlternativePosition)
+        state.onPlainToolbarVisible()
+        assertFalse(state.shouldUseAlternativePosition)
+        // A new edit correctly hides it again, without needing IME restart.
+        state.onEdit()
+        assertTrue(state.shouldUseAlternativePosition)
+        state.onPlainToolbarVisible()
+        assertFalse(state.shouldUseAlternativePosition)
+    }
+
+    @Test fun newEditorAlsoClearsOldCandidateStrip() {
+        val state = SuggestionDockState()
+        state.onRecognizedStructure(true)
+        assertTrue(state.shouldUseAlternativePosition)
+        state.onEditorChanged()
+        assertFalse(state.shouldUseAlternativePosition)
+    }
+
     @Test fun suggestionModeUsesPositionThreeWithoutRecording() {
         assertEquals(MicrophoneMode.RECORDING_DOCK,
             MicrophoneModeResolver.resolve(

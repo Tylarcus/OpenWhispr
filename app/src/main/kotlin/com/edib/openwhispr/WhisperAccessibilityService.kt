@@ -100,6 +100,7 @@ class WhisperAccessibilityService : AccessibilityService() {
     private val suggestionState = SuggestionDockState()
     private var lastFocusedEditorId: Int? = null
     private var lastSuggestionScanUptimeMs = 0L
+    private var lastFocusedEditorScanUptimeMs = 0L
     private var ignoreOwnEditsUntilMs = 0L
     private var suppressSuggestionsUntilRealEdit = false
     private var clipboardOnlySession = false
@@ -334,6 +335,22 @@ class WhisperAccessibilityService : AccessibilityService() {
     // reason the old bubble lingered. Keyboard windows are the primary signal.
     private fun refreshAccessibilityFocusSignal() {
         try {
+            // Preserve event-driven IME detection. This slow fallback
+            // recovers WebView/HTML input types which sometimes deliver
+            // focus events from a non-editable wrapper instead of the editor.
+            refreshKeyboardSnapshot()
+            if (keyboardVisibleNow()) {
+                val now = android.os.SystemClock.uptimeMillis()
+                if (now - lastFocusedEditorScanUptimeMs >= 750L) {
+                    lastFocusedEditorScanUptimeMs = now
+                    refreshFocusedEditorLayout()
+                }
+                if (prefs().getBoolean("suggestions_dock_enabled", false) &&
+                    suggestionState.shouldUseAlternativePosition &&
+                    now - lastSuggestionScanUptimeMs >= 750L) {
+                    checkSuggestionStripOnWindowEvent()
+                }
+            }
             updateOverlayVisibility()
         } catch (e: Exception) {
             Log.e(TAG, "refreshKeyboardDock failed", e)
@@ -387,23 +404,61 @@ class WhisperAccessibilityService : AccessibilityService() {
     }
 
     /**
-     * Classify the type of focused input (text/number/PIN) without reading
-     * its contents. Gboard is the same IME app across all these layouts.
+     * Read only the input type / password metadata, never user-entered text.
+     * WebView editors may send focus events from a wrapper with inputType=0.
      */
-    private fun updateEditorLayoutFromEvent(event: AccessibilityEvent) {
-        val source = event.source ?: return
-        if (!source.isEditable && !source.isPassword) return
-        val detected = KeyboardLayoutClassifier.classify(
-            source.inputType, source.isPassword
-        )
-        if (detected != activeKeyboardLayout) {
-            activeKeyboardLayout = detected
-            // A field-layout change is also a home-position transition.
-            transientPosition = null
-            transientPlacementKey = null
-            lastPlacementKey = null
-            updateOverlayVisibility()
+    private fun layoutForEditor(node: AccessibilityNodeInfo?): KeyboardLayoutProfile? {
+        if (node == null) return null
+        val input = node.inputType
+        if (!node.isEditable && !node.isPassword && input == 0) return null
+        // Hint/accessibility label is fixed UI metadata (including HTML
+        // aria-label); never use node.text or record spoken/typed values.
+        val label = node.hintText?.toString() ?: node.contentDescription?.toString()
+        return KeyboardLayoutClassifier.classify(input, node.isPassword, label)
+    }
+
+    private fun focusedEditorLayout(): KeyboardLayoutProfile? {
+        // The active application root may be a virtual WebView tree.
+        try {
+            val focused = rootInActiveWindow?.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
+            layoutForEditor(focused)?.let { return it }
+            // On some devices the IME becomes the active window; search the
+            // underlying APPLICATION windows rather than keyboard keys.
+            val appWindows = windows?.filter {
+                it.type == AccessibilityWindowInfo.TYPE_APPLICATION
+            }.orEmpty()
+            for (window in appWindows) {
+                val node = window.root?.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
+                layoutForEditor(node)?.let { return it }
+            }
+        } catch (e: Exception) {
+            Log.d(TAG, "Focused editor type not accessible", e)
         }
+        return null
+    }
+
+    private fun setKeyboardLayout(detected: KeyboardLayoutProfile?) {
+        if (detected == null || detected == activeKeyboardLayout) return
+        activeKeyboardLayout = detected
+        transientPosition = null
+        transientPlacementKey = null
+        lastPlacementKey = null
+        updateOverlayVisibility()
+    }
+
+    private fun refreshFocusedEditorLayout() {
+        setKeyboardLayout(focusedEditorLayout())
+    }
+
+    private fun updateEditorLayoutFromEvent(event: AccessibilityEvent) {
+        val sourceLayout = layoutForEditor(event.source)
+        // Prefer the actual focused editor when the event came from a
+        // wrapper or a clicked part of an HTML numeric input.
+        val focusedLayout = if (sourceLayout == null ||
+            event.eventType == AccessibilityEvent.TYPE_VIEW_FOCUSED ||
+            event.eventType == AccessibilityEvent.TYPE_VIEW_CLICKED)
+            focusedEditorLayout() else null
+        setKeyboardLayout(focusedLayout ?: sourceLayout)
     }
 
     private fun activePositionProfile(): KeyboardLayoutProfile =
@@ -472,25 +527,50 @@ class WhisperAccessibilityService : AccessibilityService() {
         if (!refreshKeyboardSnapshot()) return
         if (suppressSuggestionsUntilRealEdit) return
         val now = android.os.SystemClock.uptimeMillis()
-        // UI window trees can change dozens of times per second. Throttle
-        // ONLY this optional suggestion scan, not V4's keyboard detection.
+        // Only optional UI metadata scanning is throttled. Keyboard open/close
+        // and recording transitions continue at their original V4 speed.
         if (now - lastSuggestionScanUptimeMs < 120L) return
         lastSuggestionScanUptimeMs = now
         val ime = keyboardWindow() ?: return
         val root = ime.root ?: return
         try {
-            // The candidate strip may be hidden from accessibility completely.
-            // Only examine structural view IDs, never the words or labels.
-            var visibleStripFound = false
-            var recognizedContainer = false
+            val isGboard = root.packageName?.toString() ==
+                GboardChromeEvidence.PACKAGE_NAME
+            val imeBounds = Rect()
+            root.getBoundsInScreen(imeBounds)
+            val toolbarBottom = imeBounds.top + (90 * dp).toInt()
+
+            var visibleCandidateItem = false
+            var visibleCandidateContainer = false
+            val toolbarTokens = mutableSetOf<String>()
             var nodesVisited = 0
+
             fun search(node: AccessibilityNodeInfo) {
-                if (nodesVisited++ > 180) return
-                if (SuggestionDockState.isCandidateStripId(node.viewIdResourceName)) {
-                    recognizedContainer = true
-                    if (node.isVisibleToUser) visibleStripFound = true
-                    return
+                if (nodesVisited++ >= 240) return
+                if (!node.isVisibleToUser) return
+                val viewId = node.viewIdResourceName
+                if (GboardChromeEvidence.isCandidateItemId(viewId)) {
+                    visibleCandidateItem = true
+                } else if (GboardChromeEvidence.isCandidateContainerId(viewId)) {
+                    visibleCandidateContainer = true
                 }
+
+                // Only consider fixed Gboard toolbar buttons near the top of
+                // the keyboard. No candidate words or editable-field text
+                // are read; only whitelisted shortcut descriptions/IDs.
+                if (isGboard && node.isClickable &&
+                    !GboardChromeEvidence.isCandidateItemId(viewId)) {
+                    val rect = Rect()
+                    node.getBoundsInScreen(rect)
+                    if (rect.top >= imeBounds.top - (4 * dp).toInt() &&
+                        rect.centerY() <= toolbarBottom) {
+                        val token = GboardChromeEvidence.toolbarToken(
+                            viewId, node.contentDescription
+                        )
+                        if (token != null) toolbarTokens.add(token)
+                    }
+                }
+
                 for (i in 0 until node.childCount) {
                     val child = node.getChild(i) ?: continue
                     try {
@@ -498,16 +578,26 @@ class WhisperAccessibilityService : AccessibilityService() {
                     } finally {
                         child.recycle()
                     }
-                    if (visibleStripFound) return
+                    if (nodesVisited >= 240) break
                 }
             }
+
             search(root)
             val before = suggestionState.shouldUseAlternativePosition
-            if (recognizedContainer) {
-                suggestionState.onRecognizedStructure(visibleStripFound)
-            } else if (suggestionState.detectionMethod == "Gboard structure" && nodesVisited <= 180) {
-                // A previously detected strip actually disappeared.
-                suggestionState.onRecognizedStructure(false)
+            val plainToolbar = isGboard &&
+                GboardChromeEvidence.showsPlainToolbar(
+                    visibleCandidateItem, toolbarTokens
+                )
+            when {
+                visibleCandidateItem -> suggestionState.onRecognizedStructure(true)
+                plainToolbar -> suggestionState.onPlainToolbarVisible()
+                visibleCandidateContainer -> suggestionState.onRecognizedStructure(true)
+                suggestionState.detectionMethod == "Gboard structure" &&
+                    nodesVisited < 240 ->
+                    suggestionState.onRecognizedStructure(false)
+                // Else: Gboard did not expose enough metadata. Preserve
+                // the sticky fallback rather than falsely claiming words
+                // disappeared after an arbitrary timer.
             }
             if (before != suggestionState.shouldUseAlternativePosition)
                 updateOverlayVisibility()
