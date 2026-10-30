@@ -46,9 +46,9 @@ object KeyboardLayoutClassifier {
         // never influences classification.
         val label = fieldLabel?.trim()?.lowercase(java.util.Locale.ROOT).orEmpty()
         if (fieldClass == InputType.TYPE_CLASS_TEXT && label.isNotEmpty()) {
-            if (Regex("""\\b(pin|passcode|password|verification code|security code)\\b""")
+            if (Regex("""\b(pin|passcode|password|verification code|security code)\b""")
                     .containsMatchIn(label)) return KeyboardLayoutProfile.SECURE
-            if (Regex("""\\b(reps|repetitions|numeric|digits|quantity|number of|weight|kilograms|kg|lbs)\\b""")
+            if (Regex("""\b(reps|repetitions|numeric|digits|quantity|number of|weight|kilograms|kg|lbs)\b""")
                     .containsMatchIn(label)) return KeyboardLayoutProfile.NUMBER
         }
         return KeyboardLayoutProfile.TEXT
