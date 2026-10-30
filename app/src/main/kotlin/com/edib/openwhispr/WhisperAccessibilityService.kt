@@ -524,7 +524,8 @@ class WhisperAccessibilityService : AccessibilityService() {
         keyboardVisibleNow(), state == State.RECORDING,
         prefs().getBoolean("recording_dock_enabled", false),
         positionCalibrationMode,
-        suggestionsBusy = suggestionState.shouldUseAlternativePosition &&
+        suggestionsBusy = activeKeyboardLayout == KeyboardLayoutProfile.TEXT &&
+            suggestionState.shouldUseAlternativePosition &&
             !suppressSuggestionsUntilRealEdit,
         suggestionsDockEnabled = prefs().getBoolean("suggestions_dock_enabled", false),
         typingAction = typingAction()
@@ -538,7 +539,8 @@ class WhisperAccessibilityService : AccessibilityService() {
         positionCalibrationMode == null && state == State.IDLE &&
             MicrophoneModeResolver.shouldHideForTyping(
                 keyboardVisibleNow(), recording = false,
-                suggestionsBusy = suggestionState.shouldUseAlternativePosition &&
+                suggestionsBusy = activeKeyboardLayout == KeyboardLayoutProfile.TEXT &&
+                    suggestionState.shouldUseAlternativePosition &&
                     !suppressSuggestionsUntilRealEdit,
                 suggestionsDockEnabled = prefs().getBoolean("suggestions_dock_enabled", false),
                 typingAction = typingAction()
