@@ -87,7 +87,7 @@ class BubbleSizeTest {
     @Test
     fun `maximum size is limited by screen width`() {
         val fullHd = BubbleSize.maxPercentForScreen(1080, 3f)
-        assertEquals(320, fullHd) // half of 1080 px is 180 dp; ~321% of 56 dp
+        assertEquals(321, fullHd) // half of 1080 px is 180 dp; ~321% of 56 dp
         assertTrue(BubbleSize.maxPercentForScreen(400, 2f) < fullHd)
     }
 
