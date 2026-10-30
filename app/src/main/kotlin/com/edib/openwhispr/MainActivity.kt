@@ -388,9 +388,9 @@ class MainActivity : AppCompatActivity() {
         val bubbleSizeSlider = Slider(this).apply {
             id = View.generateViewId()
             valueFrom = BubbleSize.MIN_PERCENT.toFloat()
-            valueTo = BubbleSize.MAX_PERCENT.toFloat()
+            valueTo = BubbleSize.maxPercentForScreen(resources.displayMetrics.widthPixels, resources.displayMetrics.density).toFloat()
             stepSize = BubbleSize.STEP_PERCENT.toFloat()
-            value = currentBubbleSizePercent().toFloat()
+            value = currentBubbleSizePercent().coerceAtMost(BubbleSize.maxPercentForScreen(resources.displayMetrics.widthPixels, resources.displayMetrics.density)).toFloat()
             setLabelFormatter { localizedBubbleLabel(it.toInt()) }
             contentDescription = getString(R.string.bubble_size_accessibility)
             layoutParams = LinearLayout.LayoutParams(LP_MATCH, dp(64))
@@ -398,25 +398,20 @@ class MainActivity : AppCompatActivity() {
         bubbleSizeLabel.labelFor = bubbleSizeSlider.id
         bubbleSizeSlider.addOnChangeListener { slider, value, fromUser ->
             if (fromUser) {
-                val percent = BubbleSize.sliderPercent(value.toInt())
+                val percent = BubbleSize.sliderPercent(value.toInt()).coerceAtMost(BubbleSize.maxPercentForScreen(resources.displayMetrics.widthPixels, resources.displayMetrics.density))
                 prefs().edit().putInt(BubbleSize.PREFERENCE_KEY, percent).apply()
                 selectedBubbleSize.text = localizedBubbleLabel(percent)
                 slider.contentDescription = "${getString(R.string.bubble_size_accessibility)}, ${localizedBubbleDescription(percent)}"
                 WhisperAccessibilityService.instance?.refreshBubbleSize()
             }
         }
-        val initialBubbleSize = currentBubbleSizePercent()
+        val initialBubbleSize = currentBubbleSizePercent().coerceAtMost(BubbleSize.maxPercentForScreen(resources.displayMetrics.widthPixels, resources.displayMetrics.density))
         selectedBubbleSize.text = localizedBubbleLabel(initialBubbleSize)
         bubbleSizeSlider.contentDescription = "${getString(R.string.bubble_size_accessibility)}, ${localizedBubbleDescription(initialBubbleSize)}"
         bubbleSizePanel.addView(bubbleSizeSlider)
 
         val rangeCaption = TextView(this).apply {
-            text = getString(
-                R.string.bubble_size_help,
-                BubbleSize.MIN_PERCENT,
-                BubbleSize.MAX_PERCENT,
-                BubbleSize.DEFAULT_PERCENT,
-            )
+            text = "5% (tiny) to half your screen width; 100% is original size. Very small buttons may be hard to tap."
             textSize = 12f
             setTextColor(attrColor(android.R.attr.textColorSecondary))
             labelFor = bubbleSizeSlider.id
@@ -424,76 +419,36 @@ class MainActivity : AppCompatActivity() {
         bubbleSizePanel.addView(rangeCaption)
         settingsContainer.addView(bubbleSizePanel)
 
-        // Bubble position: a slider for the height (share of the screen height) and a
-        // left/right switch. A placeholder circle previews the spot; the bubble itself
-        // moves once the control has rested for a moment.
-        fun savedPositionPercent() = BubbleSize.positionPercent(
-            prefs().getInt(BubbleSize.POSITION_PERCENT_KEY, BubbleSize.DEFAULT_POSITION_PERCENT)
-        )
-        fun savedOnLeft() = prefs().getBoolean(BubbleSize.ON_LEFT_KEY, false)
-        val applyPosition = Runnable { WhisperAccessibilityService.instance?.refreshPosition() }
-
-        val positionPanel = vertical(dp(24), dp(8))
-        val positionLabel = TextView(this).apply {
-            text = getString(R.string.overlay_position)
-            textSize = 18f
-            setTextColor(attrColor(android.R.attr.textColorPrimary))
-        }
-        positionPanel.addView(positionLabel)
-        val selectedPosition = TextView(this).apply {
+        // V2 positions are set directly by dragging the actual microphone.
+        // One saved position applies while Gboard is open, the other while
+        // dictation is active outside the keyboard; no edge snapping.
+        settingsContainer.addView(TextView(this).apply {
+            text = "Drag the microphone anywhere to set its location. Open the keyboard " +
+                "to save the keyboard position; while recording without the keyboard, " +
+                "drag it again to save a separate floating position. " +
+                "Both locations are remembered. When idle and the keyboard is closed, " +
+                "the microphone stays hidden."
             textSize = 14f
+            setPadding(dp(24), dp(8), dp(24), dp(20))
             setTextColor(attrColor(android.R.attr.textColorSecondary))
-            setPadding(0, dp(2), 0, dp(4))
-            accessibilityLiveRegion = View.ACCESSIBILITY_LIVE_REGION_POLITE
-            text = getString(R.string.overlay_position_value, savedPositionPercent())
-        }
-        positionPanel.addView(selectedPosition)
-        positionLabel.id = View.generateViewId()
-        val positionSlider = Slider(this).apply {
-            id = View.generateViewId()
-            valueFrom = 0f
-            valueTo = 100f
-            stepSize = 1f
-            value = savedPositionPercent().toFloat()
-            setLabelFormatter { getString(R.string.overlay_position_value, it.toInt()) }
-            contentDescription = getString(R.string.overlay_position_accessibility)
-            layoutParams = LinearLayout.LayoutParams(LP_MATCH, dp(64))
-        }
-        positionLabel.labelFor = positionSlider.id
-        positionSlider.addOnChangeListener { slider, sliderValue, fromUser ->
-            if (fromUser) {
-                val percent = sliderValue.toInt()
-                prefs().edit().putInt(BubbleSize.POSITION_PERCENT_KEY, percent).apply()
-                selectedPosition.text = getString(R.string.overlay_position_value, percent)
-                WhisperAccessibilityService.instance?.previewPosition(percent, savedOnLeft())
-                slider.removeCallbacks(applyPosition)
-                slider.postDelayed(applyPosition, 500)
-            }
-        }
-        positionPanel.addView(positionSlider)
-        positionPanel.addView(TextView(this).apply {
-            text = getString(R.string.overlay_position_help)
-            textSize = 12f
-            setTextColor(attrColor(android.R.attr.textColorSecondary))
-            labelFor = positionSlider.id
         })
-        settingsContainer.addView(positionPanel)
 
-        val sideSwitch = MaterialSwitch(this).apply {
-            isChecked = savedOnLeft()
+        settingsContainer.addView(sectionHeader("Background notification"))
+        val notifSwitch = MaterialSwitch(this).apply {
+            isChecked = prefs().getBoolean("persistent_notification_enabled", false)
             isClickable = false
         }
-        val sideRow = settingsRow(
-            getString(R.string.overlay_side_left), getString(R.string.overlay_side_left_summary), sideSwitch
+        val notifRow = settingsRow(
+            "Keep OpenWispr running in foreground",
+            "Off: no persistent notification, but Android may stop the service in the background. On: more reliable, with an ongoing notification.",
+            notifSwitch
         ) {
-            val left = !sideSwitch.isChecked
-            sideSwitch.isChecked = left
-            prefs().edit().putBoolean(BubbleSize.ON_LEFT_KEY, left).apply()
-            WhisperAccessibilityService.instance?.previewPosition(savedPositionPercent(), left)
-            positionSlider.removeCallbacks(applyPosition)
-            positionSlider.postDelayed(applyPosition, 500)
+            val enabled = !notifSwitch.isChecked
+            notifSwitch.isChecked = enabled
+            prefs().edit().putBoolean("persistent_notification_enabled", enabled).apply()
+            WhisperAccessibilityService.instance?.refreshPersistentNotification()
         }
-        settingsContainer.addView(group().apply { addView(sideRow) })
+        settingsContainer.addView(group().apply { addView(notifRow) })
 
         settingsContainer.addView(sectionHeader(getString(R.string.backup_section)))
         val backupGroup = group()
