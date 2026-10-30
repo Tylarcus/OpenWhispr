@@ -4,7 +4,6 @@ on:
   push:
     branches:
       - main
-      - feature/gboard-dock-v9
   workflow_dispatch:
 
 permissions:
@@ -66,11 +65,11 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "gboard-dock-v9-check-${{ github.run_number }}" \
-            "app/build/outputs/apk/debug/app-debug.apk#OpenWhispr-V9-Check-Signed-${{ github.run_number }}.apk" \
+          gh release create "gboard-dock-main-${{ github.run_number }}" \
+            "app/build/outputs/apk/debug/app-debug.apk#OpenWhispr-Personal-Signed-${{ github.run_number }}.apk" \
             --repo "${{ github.repository }}" \
             --target "${{ github.sha }}" \
-            --title "OpenWhispr V9 Signed Verification #${{ github.run_number }}" \
+            --title "OpenWhispr Personal Signed Build #${{ github.run_number }}" \
             --notes "Independently maintained personal fork of EdiBianco/OpenWhispr. Signed with the persistent test key so Android can upgrade previous signed builds. Uses package com.edib.openwhispr.docktest, separate from the upstream app. Experimental: test on your own device." \
             --prerelease \
             --latest=false
