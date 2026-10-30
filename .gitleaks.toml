@@ -18,7 +18,10 @@ keywords = ["storepassword", "keypassword"]
 
 [allowlist]
 description = "Placeholders and docs"
-regexes = ['''gsk_(…|\.\.\.)''', '''gsk_X+''', '''(storePassword|keyPassword)\s*=\s*"android"''']
+regexes = ['''gsk_(…|\.\.\.)''', '''gsk_X+''', '''(storePassword|keyPassword)\s*=\s*"android"''', '''(storePassword|keyPassword)\s*=\s*"OpenWhisprDockTest2026!"''']
+# The dock-test password is a known public test-only password; the actual PKCS12
+# keystore/private key remains exclusively in the protected GitHub secret.
+# Keep flagging all other signing passwords and service API keys.
 # Commit that added the old debug signing config (public Android default password "android"); not a secret.
 commits = ["49642fae809b05f05ae211cd4b21e8d7492e62da"]
 
