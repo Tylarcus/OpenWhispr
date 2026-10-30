@@ -96,6 +96,14 @@ class WhisperAccessibilityService : AccessibilityService() {
     private var state = State.IDLE
     private var overlayView: FrameLayout? = null
     private var overlayShown = false
+    private val dismissal = DismissDockState()
+    private val suggestionState = SuggestionDockState()
+    private var lastFocusedEditorId: Int? = null
+    private var clipboardOnlySession = false
+    private var dismissTargetView: TextView? = null
+    private var dismissTargetParams: WindowManager.LayoutParams? = null
+    private var previousKeyboardVisible = false
+    private var isInsideDismissZone = false
 
     // Focus alone must NOT display an idle microphone. Only a visible IME
     // qualifies; an ongoing recording/transcription remains accessible.
@@ -158,20 +166,27 @@ class WhisperAccessibilityService : AccessibilityService() {
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
-        // Never let a bad event (or a bug in our own handling of it) crash
-        // the whole app process -- an uncaught exception here previously
-        // could take the service down entirely, requiring the user to clear
-        // app storage and re-grant the accessibility permission.
         try {
             when (event?.eventType) {
                 AccessibilityEvent.TYPE_WINDOWS_CHANGED,
                 AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED,
                 AccessibilityEvent.TYPE_VIEW_FOCUSED,
-                AccessibilityEvent.TYPE_VIEW_CLICKED ->
+                AccessibilityEvent.TYPE_VIEW_CLICKED -> {
                     refreshAccessibilityFocusSignal()
+                    if (prefs().getBoolean("suggestions_dock_enabled", false))
+                        checkSuggestionStripOnWindowEvent()
+                }
+                AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED -> {
+                    if (prefs().getBoolean("suggestions_dock_enabled", false))
+                        checkSuggestionStripOnWindowEvent()
+                }
+                AccessibilityEvent.TYPE_VIEW_TEXT_CHANGED -> {
+                    if (prefs().getBoolean("suggestions_dock_enabled", false))
+                        onTextFieldChanged(event)
+                }
             }
         } catch (e: Exception) {
-            Log.e(TAG, "onAccessibilityEvent handling failed", e)
+            Log.e(TAG, "Keyboard event handling failed", e)
         }
     }
 
@@ -180,6 +195,7 @@ class WhisperAccessibilityService : AccessibilityService() {
     override fun onDestroy() {
         instance = null
         removePositionPreview()
+        removeDismissTarget()
         stopTone?.release()
         stopTone = null
         handler.removeCallbacks(focusPoller)
@@ -323,12 +339,19 @@ class WhisperAccessibilityService : AccessibilityService() {
     // answers while Gboard was opening/closing.
     private fun refreshKeyboardSnapshot(): Boolean {
         val currentWindows = try { windows } catch (_: Exception) { null }
-        keyboardVisibleCached = if (!currentWindows.isNullOrEmpty()) {
+        val visible = if (!currentWindows.isNullOrEmpty()) {
             currentWindows.any { it.type == AccessibilityWindowInfo.TYPE_INPUT_METHOD }
-        } else {
-            imeVisibleSignal
+        } else imeVisibleSignal
+        if (visible != previousKeyboardVisible) {
+            if (!visible) {
+                suggestionState.onKeyboardClosed()
+                lastFocusedEditorId = null
+            }
+            dismissal.onKeyboardChanged(visible)
+            previousKeyboardVisible = visible
         }
-        return keyboardVisibleCached
+        keyboardVisibleCached = visible
+        return visible
     }
 
     private fun keyboardVisibleNow(): Boolean = keyboardVisibleCached
@@ -348,12 +371,65 @@ class WhisperAccessibilityService : AccessibilityService() {
         updateOverlayVisibility()
     }
 
-    // Position 3 is active ONLY while RECORDING with Gboard visible.
+    private fun onTextFieldChanged(event: AccessibilityEvent) {
+        if (!refreshKeyboardSnapshot()) return
+        if (event.packageName?.toString() == packageName) return
+        // No text content read. Just the Android event type/editor class.
+        val editor = event.source
+        val editorClass = event.className?.toString().orEmpty()
+        if (editor?.isEditable != true &&
+            !editorClass.contains("EditText", ignoreCase = true)) return
+        suggestionState.onEdit()
+        updateOverlayVisibility()
+    }
+
+    private fun checkSuggestionStripOnWindowEvent() {
+        if (!refreshKeyboardSnapshot()) return
+        val ime = keyboardWindow() ?: return
+        val root = ime.root ?: return
+        try {
+            // The candidate strip may be hidden from accessibility completely.
+            // Only examine structural view IDs, never the words or labels.
+            var visibleStripFound = false
+            var nodesVisited = 0
+            fun search(node: AccessibilityNodeInfo) {
+                if (nodesVisited++ > 180) return
+                if (SuggestionDockState.isCandidateStripId(node.viewIdResourceName)) {
+                    visibleStripFound = node.isVisibleToUser
+                    return
+                }
+                for (i in 0 until node.childCount) {
+                    val child = node.getChild(i) ?: continue
+                    try {
+                        search(child)
+                    } finally {
+                        child.recycle()
+                    }
+                    if (visibleStripFound) return
+                }
+            }
+            search(root)
+            if (visibleStripFound) {
+                suggestionState.onRecognizedStructure(true)
+                updateOverlayVisibility()
+            }
+            // Absence of an ID isn't evidence that the suggestions disappeared:
+            // many Gboard versions hide these child nodes, so keep fallback.
+        } catch (e: Exception) {
+            Log.w(TAG, "Suggestion structure not exposed", e)
+        } finally {
+            root.recycle()
+        }
+    }
+
+    // Position 3 handles recording with Gboard or its suggested-word bar.
     // Finishing recording immediately restores position 1 (no timer).
     private fun currentMode(): MicrophoneMode = MicrophoneModeResolver.resolve(
         keyboardVisibleNow(), state == State.RECORDING,
         prefs().getBoolean("recording_dock_enabled", false),
-        positionCalibrationMode
+        positionCalibrationMode,
+        suggestionsBusy = suggestionState.shouldUseAlternativePosition,
+        suggestionsDockEnabled = prefs().getBoolean("suggestions_dock_enabled", false)
     )
 
     fun startPositionCalibration(mode: MicrophoneMode) {
@@ -375,7 +451,8 @@ class WhisperAccessibilityService : AccessibilityService() {
     }
 
     private fun wantsOverlay(): Boolean =
-        masterEnabled() && (positionCalibrationMode != null || keyboardVisibleNow() || state != State.IDLE)
+        masterEnabled() && !dismissal.dismissed &&
+            (positionCalibrationMode != null || keyboardVisibleNow() || state != State.IDLE)
 
     // Preserve the V4 full-display coordinates and preference names.
     private fun posKey(mode: MicrophoneMode, axis: String): String = when (mode) {
@@ -442,7 +519,7 @@ class WhisperAccessibilityService : AccessibilityService() {
 
     private fun updateOverlayVisibility() {
         refreshKeyboardSnapshot()
-        dockOverlayToKeyboard()
+        if (!dismissal.dismissed) dockOverlayToKeyboard()
         val shouldShow = wantsOverlay()
         if (shouldShow == overlayShown) {
             if (shouldShow && overlayView?.visibility != View.VISIBLE) animateOverlayIn()
