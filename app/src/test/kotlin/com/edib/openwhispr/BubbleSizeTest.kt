@@ -10,7 +10,7 @@ class BubbleSizeTest {
         assertEquals(BubbleSize.DEFAULT_PERCENT, BubbleSize.preferencePercent(null))
         assertEquals(BubbleSize.DEFAULT_PERCENT, BubbleSize.preferencePercent(89))
         assertEquals(BubbleSize.DEFAULT_PERCENT, BubbleSize.preferencePercent(96))
-        assertEquals(BubbleSize.DEFAULT_PERCENT, BubbleSize.preferencePercent(155))
+        assertEquals(BubbleSize.DEFAULT_PERCENT, BubbleSize.preferencePercent(1005))
     }
 
     @Test
@@ -25,16 +25,16 @@ class BubbleSizeTest {
     }
 
     @Test
-    fun `range scales dimensions while maintaining a 48dp touch target`() {
+    fun `range supports tiny controls and large overlays without hard touch size limit`() {
         val minimum = BubbleSize.dimensions(BubbleSize.MIN_PERCENT)
         val maximum = BubbleSize.dimensions(BubbleSize.MAX_PERCENT)
 
-        assertEquals(40, minimum.buttonDp)
-        assertEquals(50, minimum.ringDp)
-        assertEquals(9, minimum.paddingDp)
-        assertEquals(66, maximum.buttonDp)
-        assertEquals(84, maximum.ringDp)
-        assertTrue(minimum.ringDp >= BubbleSize.MIN_TOUCH_TARGET_DP)
+        assertEquals(2, minimum.buttonDp)
+        assertEquals(3, minimum.ringDp)
+        assertEquals(1, minimum.paddingDp)
+        assertEquals(440, maximum.buttonDp)
+        assertEquals(560, maximum.ringDp)
+        assertEquals(10, minimum.tapThresholdDp)
     }
 
     @Test
@@ -42,12 +42,12 @@ class BubbleSizeTest {
         assertEquals(BubbleSize.MIN_PERCENT, BubbleSize.sliderPercent(0))
         assertEquals(90, BubbleSize.sliderPercent(92))
         assertEquals(95, BubbleSize.sliderPercent(93))
-        assertEquals(150, BubbleSize.sliderPercent(200))
+        assertEquals(200, BubbleSize.sliderPercent(200))
         assertEquals(115, BubbleSize.preferencePercent(115))
     }
 
     @Test
-    fun `resizing clamps position and edge snapping uses updated ring size`() {
+    fun `resizing clamps position while legacy snap helper stays compatible`() {
         assertEquals(
             BubbleSize.Position(8, 2308),
             BubbleSize.clampPosition(-20, 5000, 1080, 2400, 84, 8)
@@ -82,6 +82,13 @@ class BubbleSizeTest {
         val position = BubbleSize.positionFor(100, false, 1080, 90, 84, 8)
         assertTrue(position.y >= 8)
         assertTrue(position.x >= 8)
+    }
+
+    @Test
+    fun `maximum size is limited by screen width`() {
+        val fullHd = BubbleSize.maxPercentForScreen(1080, 3f)
+        assertEquals(320, fullHd) // half of 1080 px is 180 dp; ~321% of 56 dp
+        assertTrue(BubbleSize.maxPercentForScreen(400, 2f) < fullHd)
     }
 
     @Test
