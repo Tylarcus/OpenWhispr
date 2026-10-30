@@ -100,6 +100,7 @@ class WhisperAccessibilityService : AccessibilityService() {
     private val suggestionState = SuggestionDockState()
     private var lastFocusedEditorId: Int? = null
     private var lastSuggestionScanUptimeMs = 0L
+    private var lastFocusedEditorScanUptimeMs = 0L
     private var ignoreOwnEditsUntilMs = 0L
     private var suppressSuggestionsUntilRealEdit = false
     private var clipboardOnlySession = false
@@ -334,6 +335,22 @@ class WhisperAccessibilityService : AccessibilityService() {
     // reason the old bubble lingered. Keyboard windows are the primary signal.
     private fun refreshAccessibilityFocusSignal() {
         try {
+            // Preserve event-driven IME detection. This slow fallback
+            // recovers WebView/HTML input types which sometimes deliver
+            // focus events from a non-editable wrapper instead of the editor.
+            refreshKeyboardSnapshot()
+            if (keyboardVisibleNow()) {
+                val now = android.os.SystemClock.uptimeMillis()
+                if (now - lastFocusedEditorScanUptimeMs >= 750L) {
+                    lastFocusedEditorScanUptimeMs = now
+                    refreshFocusedEditorLayout()
+                }
+                if (prefs().getBoolean("suggestions_dock_enabled", false) &&
+                    suggestionState.shouldUseAlternativePosition &&
+                    now - lastSuggestionScanUptimeMs >= 750L) {
+                    checkSuggestionStripOnWindowEvent()
+                }
+            }
             updateOverlayVisibility()
         } catch (e: Exception) {
             Log.e(TAG, "refreshKeyboardDock failed", e)
@@ -387,23 +404,58 @@ class WhisperAccessibilityService : AccessibilityService() {
     }
 
     /**
-     * Classify the type of focused input (text/number/PIN) without reading
-     * its contents. Gboard is the same IME app across all these layouts.
+     * Read only the input type / password metadata, never user-entered text.
+     * WebView editors may send focus events from a wrapper with inputType=0.
      */
-    private fun updateEditorLayoutFromEvent(event: AccessibilityEvent) {
-        val source = event.source ?: return
-        if (!source.isEditable && !source.isPassword) return
-        val detected = KeyboardLayoutClassifier.classify(
-            source.inputType, source.isPassword
-        )
-        if (detected != activeKeyboardLayout) {
-            activeKeyboardLayout = detected
-            // A field-layout change is also a home-position transition.
-            transientPosition = null
-            transientPlacementKey = null
-            lastPlacementKey = null
-            updateOverlayVisibility()
+    private fun layoutForEditor(node: AccessibilityNodeInfo?): KeyboardLayoutProfile? {
+        if (node == null) return null
+        val input = node.inputType
+        if (!node.isEditable && !node.isPassword && input == 0) return null
+        return KeyboardLayoutClassifier.classify(input, node.isPassword)
+    }
+
+    private fun focusedEditorLayout(): KeyboardLayoutProfile? {
+        // The active application root may be a virtual WebView tree.
+        try {
+            val focused = rootInActiveWindow?.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
+            layoutForEditor(focused)?.let { return it }
+            // On some devices the IME becomes the active window; search the
+            // underlying APPLICATION windows rather than keyboard keys.
+            val appWindows = windows?.filter {
+                it.type == AccessibilityWindowInfo.TYPE_APPLICATION && it.isActive
+            }.orEmpty()
+            for (window in appWindows) {
+                val node = window.root?.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
+                layoutForEditor(node)?.let { return it }
+            }
+        } catch (e: Exception) {
+            Log.d(TAG, "Focused editor type not accessible", e)
         }
+        return null
+    }
+
+    private fun setKeyboardLayout(detected: KeyboardLayoutProfile?) {
+        if (detected == null || detected == activeKeyboardLayout) return
+        activeKeyboardLayout = detected
+        transientPosition = null
+        transientPlacementKey = null
+        lastPlacementKey = null
+        updateOverlayVisibility()
+    }
+
+    private fun refreshFocusedEditorLayout() {
+        setKeyboardLayout(focusedEditorLayout())
+    }
+
+    private fun updateEditorLayoutFromEvent(event: AccessibilityEvent) {
+        val sourceLayout = layoutForEditor(event.source)
+        // Prefer the actual focused editor when the event came from a
+        // wrapper or a clicked part of an HTML numeric input.
+        val focusedLayout = if (sourceLayout == null ||
+            event.eventType == AccessibilityEvent.TYPE_VIEW_FOCUSED ||
+            event.eventType == AccessibilityEvent.TYPE_VIEW_CLICKED)
+            focusedEditorLayout() else null
+        setKeyboardLayout(focusedLayout ?: sourceLayout)
     }
 
     private fun activePositionProfile(): KeyboardLayoutProfile =
