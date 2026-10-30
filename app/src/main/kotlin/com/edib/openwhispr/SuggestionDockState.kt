@@ -10,6 +10,16 @@ package com.edib.openwhispr
  * closes or the user changes the focused editor.
  */
 class SuggestionDockState {
+    companion object {
+        /** Match stable accessibility view IDs, not private suggestion text. */
+        fun isCandidateStripId(id: String?): Boolean {
+            val normalized = id?.lowercase() ?: return false
+            return normalized.contains("suggestion_strip") ||
+                normalized.contains("candidate_strip") ||
+                normalized.contains("suggestion_list") ||
+                normalized.contains("candidate_view")
+        }
+    }
     private var hasRecognizableStrip = false
     private var stripVisible = false
     private var editedInCurrentField = false
