@@ -12,11 +12,26 @@ val releaseProps = Properties().apply {
     if (file.exists()) file.inputStream().use { load(it) }
 }
 
+// Persistent TEST-ONLY signing identity. The key is provided by a private
+// GitHub Actions secret, never committed into this public repository.
+val dockTestKeyStore = rootProject.file("dock-test-signing.p12")
+val dockTestBuildNumber = System.getenv("DOCK_TEST_BUILD_NUMBER")?.toIntOrNull()
+
+
 android {
     namespace = "com.edib.openwhispr"
     compileSdk = 35
 
     signingConfigs {
+        create("dockTest") {
+            if (dockTestKeyStore.exists()) {
+                storeFile = dockTestKeyStore
+                storeType = "pkcs12"
+                storePassword = "OpenWhisprDockTest2026!"
+                keyAlias = "docktest"
+                keyPassword = "OpenWhisprDockTest2026!"
+            }
+        }
         create("release") {
             if (releaseProps.isNotEmpty()) {
                 storeFile = rootProject.file(releaseProps.getProperty("storeFile"))
@@ -31,13 +46,22 @@ android {
         applicationId = "com.edib.openwhispr"
         minSdk = 30
         targetSdk = 35
-        versionCode = 40
+        // CI monotonically increases test versions so Android accepts upgrades.
+        versionCode = if (dockTestBuildNumber != null)
+            40000 + dockTestBuildNumber else 40
         versionName = "4.0.0"
 
         ndk { abiFilters += "arm64-v8a" }
     }
 
     buildTypes {
+        debug {
+            applicationIdSuffix = ".docktest"
+            versionNameSuffix = "-docktest"
+            if (dockTestKeyStore.exists()) {
+                signingConfig = signingConfigs.getByName("dockTest")
+            }
+        }
         release {
             signingConfig = signingConfigs.getByName("release")
         }

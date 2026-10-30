@@ -388,35 +388,62 @@ class MainActivity : AppCompatActivity() {
         val bubbleSizeSlider = Slider(this).apply {
             id = View.generateViewId()
             valueFrom = BubbleSize.MIN_PERCENT.toFloat()
-            valueTo = BubbleSize.MAX_PERCENT.toFloat()
+            valueTo = BubbleSize.maxPercentForScreen(resources.displayMetrics.widthPixels, resources.displayMetrics.density).toFloat()
             stepSize = BubbleSize.STEP_PERCENT.toFloat()
-            value = currentBubbleSizePercent().toFloat()
+            value = currentBubbleSizePercent().coerceAtMost(BubbleSize.maxPercentForScreen(resources.displayMetrics.widthPixels, resources.displayMetrics.density)).toFloat()
             setLabelFormatter { localizedBubbleLabel(it.toInt()) }
             contentDescription = getString(R.string.bubble_size_accessibility)
             layoutParams = LinearLayout.LayoutParams(LP_MATCH, dp(64))
         }
         bubbleSizeLabel.labelFor = bubbleSizeSlider.id
-        bubbleSizeSlider.addOnChangeListener { slider, value, fromUser ->
-            if (fromUser) {
-                val percent = BubbleSize.sliderPercent(value.toInt())
-                prefs().edit().putInt(BubbleSize.PREFERENCE_KEY, percent).apply()
-                selectedBubbleSize.text = localizedBubbleLabel(percent)
-                slider.contentDescription = "${getString(R.string.bubble_size_accessibility)}, ${localizedBubbleDescription(percent)}"
-                WhisperAccessibilityService.instance?.refreshBubbleSize()
+        fun storePreciseBubbleSize(percent: Int) {
+            val maximum = BubbleSize.maxPercentForScreen(
+                resources.displayMetrics.widthPixels, resources.displayMetrics.density
+            )
+            val stored = BubbleSize.sliderPercent(percent).coerceAtMost(maximum)
+            prefs().edit().putInt(BubbleSize.PREFERENCE_KEY, stored).apply()
+            selectedBubbleSize.text = localizedBubbleLabel(stored)
+            bubbleSizeSlider.contentDescription =
+                "${getString(R.string.bubble_size_accessibility)}, ${localizedBubbleDescription(stored)}"
+            WhisperAccessibilityService.instance?.refreshBubbleSize()
+        }
+        bubbleSizeSlider.addOnChangeListener { _, value, fromUser ->
+            if (fromUser) storePreciseBubbleSize(value.toInt())
+        }
+        val sizeNudges = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        val sizeDown = MaterialButton(this).apply {
+            text = "− 1%"
+            contentDescription = "Decrease microphone size by one percent"
+            setOnClickListener {
+                val next = (bubbleSizeSlider.value.toInt() - 1)
+                    .coerceAtLeast(BubbleSize.MIN_PERCENT)
+                bubbleSizeSlider.value = next.toFloat()
+                storePreciseBubbleSize(next)
             }
         }
-        val initialBubbleSize = currentBubbleSizePercent()
+        val sizeUp = MaterialButton(this).apply {
+            text = "+ 1%"
+            contentDescription = "Increase microphone size by one percent"
+            setOnClickListener {
+                val next = (bubbleSizeSlider.value.toInt() + 1)
+                    .coerceAtMost(bubbleSizeSlider.valueTo.toInt())
+                bubbleSizeSlider.value = next.toFloat()
+                storePreciseBubbleSize(next)
+            }
+        }
+        sizeNudges.addView(sizeDown, LinearLayout.LayoutParams(0, LP_WRAP, 1f))
+        sizeNudges.addView(sizeUp, LinearLayout.LayoutParams(0, LP_WRAP, 1f))
+        val initialBubbleSize = currentBubbleSizePercent().coerceAtMost(BubbleSize.maxPercentForScreen(resources.displayMetrics.widthPixels, resources.displayMetrics.density))
         selectedBubbleSize.text = localizedBubbleLabel(initialBubbleSize)
         bubbleSizeSlider.contentDescription = "${getString(R.string.bubble_size_accessibility)}, ${localizedBubbleDescription(initialBubbleSize)}"
         bubbleSizePanel.addView(bubbleSizeSlider)
+        bubbleSizePanel.addView(sizeNudges)
 
         val rangeCaption = TextView(this).apply {
-            text = getString(
-                R.string.bubble_size_help,
-                BubbleSize.MIN_PERCENT,
-                BubbleSize.MAX_PERCENT,
-                BubbleSize.DEFAULT_PERCENT,
-            )
+            text = "Adjust by 1% with the slider or −/+ buttons. 100% is original size. Tiny buttons can be hard to tap."
             textSize = 12f
             setTextColor(attrColor(android.R.attr.textColorSecondary))
             labelFor = bubbleSizeSlider.id
@@ -424,76 +451,254 @@ class MainActivity : AppCompatActivity() {
         bubbleSizePanel.addView(rangeCaption)
         settingsContainer.addView(bubbleSizePanel)
 
-        // Bubble position: a slider for the height (share of the screen height) and a
-        // left/right switch. A placeholder circle previews the spot; the bubble itself
-        // moves once the control has rested for a moment.
-        fun savedPositionPercent() = BubbleSize.positionPercent(
-            prefs().getInt(BubbleSize.POSITION_PERCENT_KEY, BubbleSize.DEFAULT_POSITION_PERCENT)
-        )
-        fun savedOnLeft() = prefs().getBoolean(BubbleSize.ON_LEFT_KEY, false)
-        val applyPosition = Runnable { WhisperAccessibilityService.instance?.refreshPosition() }
-
-        val positionPanel = vertical(dp(24), dp(8))
-        val positionLabel = TextView(this).apply {
-            text = getString(R.string.overlay_position)
-            textSize = 18f
-            setTextColor(attrColor(android.R.attr.textColorPrimary))
-        }
-        positionPanel.addView(positionLabel)
-        val selectedPosition = TextView(this).apply {
+        settingsContainer.addView(sectionHeader("Microphone positions"))
+        settingsContainer.addView(TextView(this).apply {
+            text = "Your normal Gboard and keyboard-closed dictation positions are preserved. " +
+                "Drag in a setup preview and tap Save & lock to protect each location from accidental moves. " +
+                "You can unlock later."
             textSize = 14f
+            setPadding(dp(24), dp(6), dp(24), dp(10))
             setTextColor(attrColor(android.R.attr.textColorSecondary))
-            setPadding(0, dp(2), 0, dp(4))
-            accessibilityLiveRegion = View.ACCESSIBILITY_LIVE_REGION_POLITE
-            text = getString(R.string.overlay_position_value, savedPositionPercent())
-        }
-        positionPanel.addView(selectedPosition)
-        positionLabel.id = View.generateViewId()
-        val positionSlider = Slider(this).apply {
-            id = View.generateViewId()
-            valueFrom = 0f
-            valueTo = 100f
-            stepSize = 1f
-            value = savedPositionPercent().toFloat()
-            setLabelFormatter { getString(R.string.overlay_position_value, it.toInt()) }
-            contentDescription = getString(R.string.overlay_position_accessibility)
-            layoutParams = LinearLayout.LayoutParams(LP_MATCH, dp(64))
-        }
-        positionLabel.labelFor = positionSlider.id
-        positionSlider.addOnChangeListener { slider, sliderValue, fromUser ->
-            if (fromUser) {
-                val percent = sliderValue.toInt()
-                prefs().edit().putInt(BubbleSize.POSITION_PERCENT_KEY, percent).apply()
-                selectedPosition.text = getString(R.string.overlay_position_value, percent)
-                WhisperAccessibilityService.instance?.previewPosition(percent, savedOnLeft())
-                slider.removeCallbacks(applyPosition)
-                slider.postDelayed(applyPosition, 500)
-            }
-        }
-        positionPanel.addView(positionSlider)
-        positionPanel.addView(TextView(this).apply {
-            text = getString(R.string.overlay_position_help)
-            textSize = 12f
-            setTextColor(attrColor(android.R.attr.textColorSecondary))
-            labelFor = positionSlider.id
         })
-        settingsContainer.addView(positionPanel)
-
-        val sideSwitch = MaterialSwitch(this).apply {
-            isChecked = savedOnLeft()
+        val positionsLockedSwitch = MaterialSwitch(this).apply {
+            isChecked = prefs().getBoolean("positions_locked", false)
             isClickable = false
         }
-        val sideRow = settingsRow(
-            getString(R.string.overlay_side_left), getString(R.string.overlay_side_left_summary), sideSwitch
-        ) {
-            val left = !sideSwitch.isChecked
-            sideSwitch.isChecked = left
-            prefs().edit().putBoolean(BubbleSize.ON_LEFT_KEY, left).apply()
-            WhisperAccessibilityService.instance?.previewPosition(savedPositionPercent(), left)
-            positionSlider.removeCallbacks(applyPosition)
-            positionSlider.postDelayed(applyPosition, 500)
+        settingsContainer.addView(group().apply {
+            addView(settingsRow(
+                "Lock microphone positions",
+                "Prevent accidental dragging. Tapping still starts and stops dictation.",
+                positionsLockedSwitch
+            ) {
+                val locked = !positionsLockedSwitch.isChecked
+                positionsLockedSwitch.isChecked = locked
+                prefs().edit().putBoolean("positions_locked", locked).apply()
+            })
+        })
+        val markLocked = { positionsLockedSwitch.isChecked = true }
+        settingsContainer.addView(group().apply {
+            addView(settingsRow(
+                "Set keyboard-open position",
+                "Open a test text box, drag the microphone anywhere, then save."
+            ) { promptPlacementCalibration(MicrophoneMode.KEYBOARD, markLocked) })
+            addView(settingsRow(
+                "Set keyboard-closed position",
+                "Drag a floating preview without needing to start a recording."
+            ) { promptPlacementCalibration(MicrophoneMode.FLOATING, markLocked) })
+            addView(settingsRow(
+                "Set position 3 — recording / suggestions",
+                "Choose where the microphone sits while recording or when selected for typing."
+            ) { promptPlacementCalibration(MicrophoneMode.RECORDING_DOCK, markLocked) })
+            addView(settingsRow(
+                "Set position 4 — typing only",
+                "Optional independent spot while typing, without dictation."
+            ) { promptPlacementCalibration(MicrophoneMode.TYPING_DOCK, markLocked) })
+        })
+        val recordingDockSwitch = MaterialSwitch(this).apply {
+            isChecked = prefs().getBoolean("recording_dock_enabled", false)
+            isClickable = false
         }
-        settingsContainer.addView(group().apply { addView(sideRow) })
+        settingsContainer.addView(group().apply {
+            addView(settingsRow(
+                "Use position 3 while dictating",
+                "Optional: keyboard open + recording → position 3. " +
+                    "Keyboard closed + recording → position 2. " +
+                    "Stop recording → position 1 unless suggestions are active.",
+                recordingDockSwitch
+            ) {
+                val enabled = !recordingDockSwitch.isChecked
+                recordingDockSwitch.isChecked = enabled
+                prefs().edit().putBoolean("recording_dock_enabled", enabled).apply()
+                WhisperAccessibilityService.instance?.refreshPositionPreferences()
+            })
+        })
+
+        val suggestionsSwitch = MaterialSwitch(this).apply {
+            isChecked = prefs().getBoolean("suggestions_dock_enabled", false)
+            isClickable = false
+        }
+        settingsContainer.addView(group().apply {
+            addView(settingsRow(
+                "Move away from Gboard suggestions (experimental)",
+                "Optional typing detection for Gboard word suggestions. Choose below " +
+                    "whether typing should hide the mic or move it to position 3 or 4. " +
+                    "When Gboard hides its suggestions from accessibility, " +
+                    "we keep the chosen typing behavior until the keyboard closes.",
+                suggestionsSwitch
+            ) {
+                val enabled = !suggestionsSwitch.isChecked
+                suggestionsSwitch.isChecked = enabled
+                prefs().edit().putBoolean("suggestions_dock_enabled", enabled).apply()
+                WhisperAccessibilityService.instance?.refreshPositionPreferences()
+            })
+        })
+        val typingActionNames = arrayOf(
+            "Hide microphone while typing",
+            "Move microphone to Position 3",
+            "Move microphone to Position 4"
+        )
+        val typingActionValues = arrayOf("hide", "position3", "position4")
+        fun typingActionIndex(): Int = typingActionValues.indexOf(
+            prefs().getString("typing_action", "position3")
+        ).coerceAtLeast(0)
+        var typingBehaviorRowSubtitle: TextView? = null
+        val typingBehaviorRow = settingsRow(
+            "When typing without dictation · tap to choose",
+            typingActionNames[typingActionIndex()],
+            widget = TextView(this).apply {
+                text = "▾"
+                textSize = 24f
+                setTextColor(attrColor(android.R.attr.textColorSecondary))
+                contentDescription = "Choose typing behavior"
+            }
+        ) {
+            android.app.AlertDialog.Builder(this)
+                .setTitle("When typing without dictation")
+                .setSingleChoiceItems(typingActionNames, typingActionIndex()) { dialog, selected ->
+                    prefs().edit().putString("typing_action", typingActionValues[selected]).apply()
+                    typingBehaviorRowSubtitle?.text = typingActionNames[selected]
+                    WhisperAccessibilityService.instance?.refreshPositionPreferences()
+                    dialog.dismiss()
+                }
+                .setNegativeButton("Cancel", null)
+                .show()
+        }
+        // Subtitle can be updated immediately without rebuilding the settings screen.
+        typingBehaviorRowSubtitle = typingBehaviorRow.findViewWithTag("subtitle")
+        settingsContainer.addView(group().apply { addView(typingBehaviorRow) })
+
+        settingsContainer.addView(sectionHeader("Numeric and PIN keypads"))
+        settingsContainer.addView(TextView(this).apply {
+            text = "Gboard changes its layout for number fields and PINs. " +
+                "By default the microphone hides on numeric keypads. " +
+                "Password/PIN fields remain hidden when idle for privacy. " +
+                "Some custom PIN apps don't expose their input type."
+            textSize = 13f
+            setTextColor(attrColor(android.R.attr.textColorSecondary))
+            setPadding(dp(24), dp(6), dp(24), dp(14))
+        })
+        val numericOptions = arrayOf(
+            "Hide microphone on numeric keypads",
+            "Use the normal text keyboard positions",
+            "Use separately saved numeric positions"
+        )
+        val numericValues = arrayOf("hide", "shared", "separate")
+        fun numericIndex(): Int = numericValues.indexOf(
+            prefs().getString("numeric_keyboard_behavior", "hide")
+        ).coerceAtLeast(0)
+        var numericSubtitle: TextView? = null
+        val numericBehaviorRow = settingsRow(
+            "When a number keypad opens · tap to choose",
+            numericOptions[numericIndex()],
+            widget = TextView(this).apply {
+                text = "▾"
+                textSize = 24f
+                setTextColor(attrColor(android.R.attr.textColorSecondary))
+                contentDescription = "Choose numeric keyboard behavior"
+            }
+        ) {
+            android.app.AlertDialog.Builder(this)
+                .setTitle("When Gboard shows a numeric keypad")
+                .setSingleChoiceItems(numericOptions, numericIndex()) { dialog, selected ->
+                    prefs().edit().putString(
+                        "numeric_keyboard_behavior", numericValues[selected]
+                    ).apply()
+                    numericSubtitle?.text = numericOptions[selected]
+                    WhisperAccessibilityService.instance?.refreshPositionPreferences()
+                    dialog.dismiss()
+                }
+                .setNegativeButton("Cancel", null)
+                .show()
+        }
+        numericSubtitle = numericBehaviorRow.findViewWithTag("subtitle")
+        settingsContainer.addView(group().apply { addView(numericBehaviorRow) })
+        settingsContainer.addView(group().apply {
+            addView(settingsRow(
+                "Set numeric position 1",
+                "Normal idle microphone location on a number pad"
+            ) { promptPlacementCalibration(
+                MicrophoneMode.KEYBOARD, markLocked, KeyboardLayoutProfile.NUMBER
+            ) })
+            addView(settingsRow(
+                "Set numeric position 2",
+                "Floating location while dictating with the number pad closed"
+            ) { promptPlacementCalibration(
+                MicrophoneMode.FLOATING, markLocked, KeyboardLayoutProfile.NUMBER
+            ) })
+            addView(settingsRow(
+                "Set numeric position 3",
+                "Dictating while the numeric keyboard remains open"
+            ) { promptPlacementCalibration(
+                MicrophoneMode.RECORDING_DOCK, markLocked, KeyboardLayoutProfile.NUMBER
+            ) })
+            addView(settingsRow(
+                "Set numeric position 4",
+                "Typing-detector alternative location with numeric keyboard"
+            ) { promptPlacementCalibration(
+                MicrophoneMode.TYPING_DOCK, markLocked, KeyboardLayoutProfile.NUMBER
+            ) })
+        })
+
+        settingsContainer.addView(sectionHeader("Dragging behavior"))
+        val dragOptions = arrayOf(
+            "Move temporarily (return home after mode change)",
+            "Move and update saved home (when unlocked)"
+        )
+        val dragValues = arrayOf("temporary", "save")
+        fun dragIndex(): Int = dragValues.indexOf(
+            prefs().getString("drag_behavior", "temporary")
+        ).coerceAtLeast(0)
+        var dragSubtitle: TextView? = null
+        val dragBehaviorRow = settingsRow(
+            "When dragging a microphone · tap to choose",
+            dragOptions[dragIndex()],
+            widget = TextView(this).apply {
+                text = "▾"
+                textSize = 24f
+                setTextColor(attrColor(android.R.attr.textColorSecondary))
+                contentDescription = "Choose microphone drag behavior"
+            }
+        ) {
+            android.app.AlertDialog.Builder(this)
+                .setTitle("Dragging microphone")
+                .setSingleChoiceItems(dragOptions, dragIndex()) { dialog, selected ->
+                    prefs().edit().putString("drag_behavior", dragValues[selected]).apply()
+                    dragSubtitle?.text = dragOptions[selected]
+                    dialog.dismiss()
+                }
+                .setNegativeButton("Cancel", null)
+                .show()
+        }
+        dragSubtitle = dragBehaviorRow.findViewWithTag("subtitle")
+        settingsContainer.addView(group().apply { addView(dragBehaviorRow) })
+
+
+        settingsContainer.addView(TextView(this).apply {
+            text = "Drag the microphone into the red Close target at the bottom to dismiss it. " +
+                "While recording, this finishes transcription and copies it to your clipboard " +
+                "without inserting text. It reappears next time you open the keyboard. " +
+                "The Close target also works while positions are locked."
+            textSize = 13f
+            setPadding(dp(24), dp(8), dp(24), dp(18))
+            setTextColor(attrColor(android.R.attr.textColorSecondary))
+        })
+
+        settingsContainer.addView(sectionHeader("Background notification"))
+        val notifSwitch = MaterialSwitch(this).apply {
+            isChecked = prefs().getBoolean("persistent_notification_enabled", false)
+            isClickable = false
+        }
+        val notifRow = settingsRow(
+            "Keep OpenWispr running in foreground",
+            "Off: no persistent notification, but Android may stop the service in the background. On: more reliable, with an ongoing notification.",
+            notifSwitch
+        ) {
+            val enabled = !notifSwitch.isChecked
+            notifSwitch.isChecked = enabled
+            prefs().edit().putBoolean("persistent_notification_enabled", enabled).apply()
+            WhisperAccessibilityService.instance?.refreshPersistentNotification()
+        }
+        settingsContainer.addView(group().apply { addView(notifRow) })
 
         settingsContainer.addView(sectionHeader(getString(R.string.backup_section)))
         val backupGroup = group()
@@ -1574,6 +1779,87 @@ class MainActivity : AppCompatActivity() {
         larger = getString(R.string.bubble_larger_accessibility),
         percentUnit = getString(R.string.percent_unit),
     )
+    /** Guided real-keyboard placement; the overlay remains above this dialog.
+     * Calibration state is temporary, and V4's saved coordinates are preserved. */
+    private fun promptPlacementCalibration(
+        mode: MicrophoneMode,
+        afterSave: () -> Unit,
+        layout: KeyboardLayoutProfile = KeyboardLayoutProfile.TEXT
+    ) {
+        val service = WhisperAccessibilityService.instance
+        if (service == null) {
+            toast("Enable OpenWhispr's accessibility service first.")
+            return
+        }
+        val modeTitle = when (mode) {
+            MicrophoneMode.KEYBOARD -> "Keyboard-open location"
+            MicrophoneMode.FLOATING -> "Keyboard-closed location"
+            MicrophoneMode.RECORDING_DOCK -> "Keyboard busy / recording"
+            MicrophoneMode.TYPING_DOCK -> "Position 4 — typing"
+        }
+        val title = if (layout == KeyboardLayoutProfile.NUMBER)
+            "Number pad: $modeTitle" else modeTitle
+        val panel = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(20), dp(12), dp(20), dp(12))
+        }
+        panel.addView(TextView(this).apply {
+            text = when (mode) {
+                MicrophoneMode.FLOATING ->
+                    "Drag the floating microphone to its preferred position. " +
+                    "It will still hide when you're not dictating and the keyboard is closed."
+                MicrophoneMode.RECORDING_DOCK ->
+                    "This position is used while dictating with Gboard open OR when " +
+                    "suggestions are detected (if enabled). Tap the test field, drag the mic " +
+                    "away from suggestions or over Google's microphone, then Save & lock."
+                MicrophoneMode.KEYBOARD ->
+                    "Tap the test field to open Gboard. Move the microphone to your preferred " +
+                    "keyboard-open position—even above the keyboard—then tap Save & lock."
+                MicrophoneMode.TYPING_DOCK ->
+                    "This fourth position is only used when suggestions/typing are detected " +
+                    "and you've selected Position 4. Tap the test field, drag the microphone " +
+                    "anywhere, then Save & lock."
+            }
+            textSize = 14f
+            setPadding(0, 0, 0, dp(12))
+        })
+        val editor = if (mode != MicrophoneMode.FLOATING) EditText(this).apply {
+            hint = "Tap here to open Gboard and test typing"
+            setSingleLine(true)
+            inputType = if (layout == KeyboardLayoutProfile.NUMBER)
+                InputType.TYPE_CLASS_NUMBER or InputType.TYPE_NUMBER_FLAG_DECIMAL
+            else InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_CAP_SENTENCES
+        } else null
+        if (editor != null) panel.addView(editor)
+        val dialog = android.app.AlertDialog.Builder(this)
+            .setTitle(title)
+            .setView(panel)
+            .setPositiveButton("Save & lock") { _, _ ->
+                prefs().edit().putBoolean("positions_locked", true).apply()
+                afterSave()
+            }
+            .setNegativeButton("Done", null)
+            .create()
+        dialog.setOnShowListener {
+            service.startPositionCalibration(mode, layout)
+            if (editor != null) {
+                editor.requestFocus()
+                editor.post {
+                    (getSystemService(android.content.Context.INPUT_METHOD_SERVICE) as
+                        android.view.inputmethod.InputMethodManager)
+                        .showSoftInput(editor, android.view.inputmethod.InputMethodManager.SHOW_IMPLICIT)
+                }
+            }
+        }
+        dialog.setOnDismissListener { service.finishPositionCalibration() }
+        dialog.show()
+        dialog.window?.setSoftInputMode(
+            if (mode == MicrophoneMode.FLOATING)
+                android.view.WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_HIDDEN
+            else android.view.WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_VISIBLE
+        )
+    }
+
     private fun prefs() = getSharedPreferences("openwhispr", MODE_PRIVATE)
     private fun toast(msg: String) = Toast.makeText(this, msg, Toast.LENGTH_SHORT).show()
 

@@ -4,15 +4,14 @@ import kotlin.math.roundToInt
 
 object BubbleSize {
     const val PREFERENCE_KEY = "bubble_size_percent"
-    const val MIN_PERCENT = 90
+    const val MIN_PERCENT = 5
     const val DEFAULT_PERCENT = 100
-    const val MAX_PERCENT = 150
-    const val STEP_PERCENT = 5
+    const val MAX_PERCENT = 1000
+    const val STEP_PERCENT = 1
 
     const val BUTTON_DP = 44
     const val RING_DP = 56
     const val PADDING_DP = 10
-    const val MIN_TOUCH_TARGET_DP = 48
     private const val TAP_THRESHOLD_DP = 10
     private const val FEEDBACK_OFFSET_DP = 64
 
@@ -45,12 +44,19 @@ object BubbleSize {
         fun scaled(value: Int) = (value * scale).roundToInt()
 
         return Dimensions(
-            buttonDp = scaled(BUTTON_DP),
-            ringDp = maxOf(MIN_TOUCH_TARGET_DP, scaled(RING_DP)),
+            buttonDp = maxOf(1, scaled(BUTTON_DP)),
+            ringDp = maxOf(1, scaled(RING_DP)),
             paddingDp = scaled(PADDING_DP),
-            tapThresholdDp = scaled(TAP_THRESHOLD_DP),
+            tapThresholdDp = TAP_THRESHOLD_DP,
             feedbackOffsetDp = scaled(FEEDBACK_OFFSET_DP)
         )
+    }
+
+    /** Maximum overlay ring diameter is half the display width, in physical pixels. */
+    fun maxPercentForScreen(screenWidthPx: Int, density: Float): Int {
+        val halfWidthDp = screenWidthPx / (2f * density)
+        val raw = (halfWidthDp * 100f / RING_DP).toInt()
+        return (raw / STEP_PERCENT * STEP_PERCENT).coerceIn(MIN_PERCENT, MAX_PERCENT)
     }
 
     fun valueLabel(
@@ -89,6 +95,7 @@ object BubbleSize {
         return Position(x.coerceIn(margin, maxX), y.coerceIn(margin, maxY))
     }
 
+    // Retained for compatibility with older builds; V2 no longer snaps drags.
     fun snappedX(x: Int, ringSize: Int, screenWidth: Int, margin: Int): Int {
         val maxX = maxOf(margin, screenWidth - ringSize - margin)
         return if (x + ringSize / 2 > screenWidth / 2) maxX else margin

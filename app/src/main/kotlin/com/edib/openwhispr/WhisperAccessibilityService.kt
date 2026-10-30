@@ -10,6 +10,7 @@ import android.content.pm.ServiceInfo
 import android.content.res.ColorStateList
 import android.graphics.Color
 import android.graphics.PixelFormat
+import android.graphics.Rect
 import android.graphics.drawable.GradientDrawable
 import android.media.AudioFormat
 import android.media.AudioManager
@@ -52,15 +53,16 @@ class WhisperAccessibilityService : AccessibilityService() {
 
         private const val ALPHA_IDLE = 0.7f
         private const val ALPHA_ACTIVE = 1.0f
-        private const val ALPHA_FADE_MS = 150L
-        private const val FADE_OUT_MS = 140L
+        // Idle microphone sits in the IME's top toolbar, left of Gboard's mic.
+        // Tune these two offsets after testing on the target Galaxy.
+        private const val DOCK_RIGHT_DP = 113f
+        private const val DOCK_TOP_DP = 5f
 
         // How often we re-check the focused node as a failsafe, in case an
         // app never fires a focus-related accessibility event at all.
-        private const val FOCUS_POLL_MS = 500L
+        private const val FOCUS_POLL_MS = 250L
 
-        // A focus/keyboard change must hold this long before the overlay shows or hides.
-        private const val OVERLAY_DEBOUNCE_MS = 300L
+        // No visibility debounce: hiding the keyboard must hide the idle mic now.
 
         // Placeholder circle shown by Settings while choosing the bubble position.
         private const val PREVIEW_FILL = 0x552F80ED
@@ -94,15 +96,34 @@ class WhisperAccessibilityService : AccessibilityService() {
     private var state = State.IDLE
     private var overlayView: FrameLayout? = null
     private var overlayShown = false
+    private val dismissal = DismissDockState()
+    private val suggestionState = SuggestionDockState()
+    private var lastFocusedEditorId: Int? = null
+    private var lastSuggestionScanUptimeMs = 0L
+    private var ignoreOwnEditsUntilMs = 0L
+    private var suppressSuggestionsUntilRealEdit = false
+    private var clipboardOnlySession = false
+    private var dismissTargetView: TextView? = null
+    private var dismissTargetParams: WindowManager.LayoutParams? = null
+    private var previousKeyboardVisible = false
+    private var isInsideDismissZone = false
 
-    // Two independent signals feed overlay visibility (OR'd together): an
-    // accessibility-tree focus check (event-driven AND polled as a failsafe,
-    // since some apps -- notably WhatsApp/Telegram -- don't reliably fire
-    // focus events for their custom message composers) and the system
-    // keyboard's own visibility (window-manager-level, doesn't depend on the
-    // foreground app cooperating with accessibility at all).
-    private var accessibilityFocusSignal = false
+    // Focus alone must NOT display an idle microphone. Only a visible IME
+    // qualifies; an ongoing recording/transcription remains accessible.
     private var imeVisibleSignal = false
+    private var keyboardVisibleCached = false
+    private var imeBottomInsetPx = 0
+    private var isDraggingOverlay = false
+    private var gestureStartedWithKeyboard = false
+    private var dragAllowedForGesture = false
+    private var gestureStartedMode = MicrophoneMode.KEYBOARD
+    private var positionCalibrationMode: MicrophoneMode? = null
+    private var calibrationLayout: KeyboardLayoutProfile? = null
+    private var activeKeyboardLayout = KeyboardLayoutProfile.TEXT
+    private var gestureStartedLayout = KeyboardLayoutProfile.TEXT
+    private var transientPosition: BubbleSize.Position? = null
+    private var transientPlacementKey: String? = null
+    private var lastPlacementKey: String? = null
     private var button: ImageView? = null
     // [ui] Smoothed recording level for the voice-reactive overlay (main thread).
     private var audioLevel = 0f
@@ -146,7 +167,7 @@ class WhisperAccessibilityService : AccessibilityService() {
             Log.w(TAG, "Recording stop tone unavailable", e)
         }
         showOverlay()
-        startForegroundNotification()
+        refreshPersistentNotification()
         updateOverlayVisibility()
         handler.post(focusPoller)
         // Try to load local model in background
@@ -154,14 +175,32 @@ class WhisperAccessibilityService : AccessibilityService() {
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
-        // Never let a bad event (or a bug in our own handling of it) crash
-        // the whole app process -- an uncaught exception here previously
-        // could take the service down entirely, requiring the user to clear
-        // app storage and re-grant the accessibility permission.
         try {
-            refreshAccessibilityFocusSignal()
+            when (event?.eventType) {
+                AccessibilityEvent.TYPE_WINDOWS_CHANGED,
+                AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED,
+                AccessibilityEvent.TYPE_VIEW_FOCUSED,
+                AccessibilityEvent.TYPE_VIEW_CLICKED -> {
+                    updateEditorLayoutFromEvent(event)
+                    refreshAccessibilityFocusSignal()
+                    if (prefs().getBoolean("suggestions_dock_enabled", false)) {
+                        if (event.eventType == AccessibilityEvent.TYPE_VIEW_FOCUSED)
+                            onEditorFocusChanged(event)
+                        checkSuggestionStripOnWindowEvent()
+                    }
+                }
+                AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED -> {
+                    if (prefs().getBoolean("suggestions_dock_enabled", false))
+                        checkSuggestionStripOnWindowEvent()
+                }
+                AccessibilityEvent.TYPE_VIEW_TEXT_CHANGED -> {
+                    updateEditorLayoutFromEvent(event)
+                    if (prefs().getBoolean("suggestions_dock_enabled", false))
+                        onTextFieldChanged(event)
+                }
+            }
         } catch (e: Exception) {
-            Log.e(TAG, "onAccessibilityEvent handling failed", e)
+            Log.e(TAG, "Keyboard event handling failed", e)
         }
     }
 
@@ -170,9 +209,9 @@ class WhisperAccessibilityService : AccessibilityService() {
     override fun onDestroy() {
         instance = null
         removePositionPreview()
+        removeDismissTarget()
         stopTone?.release()
         stopTone = null
-        handler.removeCallbacks(overlayVisibilityDebounce)
         handler.removeCallbacks(focusPoller)
         try {
             stopForeground(STOP_FOREGROUND_REMOVE)
@@ -181,6 +220,14 @@ class WhisperAccessibilityService : AccessibilityService() {
         }
         removeOverlay()
         super.onDestroy()
+    }
+
+    fun refreshPersistentNotification() {
+        if (prefs().getBoolean("persistent_notification_enabled", false)) {
+            startForegroundNotification()
+        } else {
+            try { stopForeground(STOP_FOREGROUND_REMOVE) } catch (_: Exception) {}
+        }
     }
 
     private fun startForegroundNotification() {
@@ -280,120 +327,375 @@ class WhisperAccessibilityService : AccessibilityService() {
     /** Reload local model (called from MainActivity when settings change) */
     fun reloadModel() { thread { initLocalModel() } }
 
-    // --- Overlay visibility (multi-signal, OR'd together) ---
-
+    // --- Keyboard-only idle docking ---
+    //
+    // Focused text fields aren't reliable indicators of IME visibility. A field
+    // can remain focused for seconds after the keyboard closes, which was the
+    // reason the old bubble lingered. Keyboard windows are the primary signal.
     private fun refreshAccessibilityFocusSignal() {
         try {
-            val root = rootInActiveWindow
-            val focused = root?.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
-            // The foreground app's own tree is only one witness: web-based
-            // composers (the Claude app's Code tab) often don't report an
-            // editable focus at all. The other two come from the system.
-            accessibilityFocusSignal = (focused != null && isEditableTextField(focused)) ||
-                hasActiveTextInput() || isKeyboardWindowShown()
-            focused?.recycle()
-            root?.recycle()
+            updateOverlayVisibility()
         } catch (e: Exception) {
-            Log.e(TAG, "refreshAccessibilityFocusSignal failed", e)
-        } finally {
+            Log.e(TAG, "refreshKeyboardDock failed", e)
+        }
+    }
+
+    private fun keyboardWindow(): AccessibilityWindowInfo? =
+        try {
+            windows?.firstOrNull { it.type == AccessibilityWindowInfo.TYPE_INPUT_METHOD }
+        } catch (e: Exception) {
+            Log.w(TAG, "Keyboard window lookup failed", e)
+            null
+        }
+
+    // Read Android window state ONCE per update. In V3 it could be queried
+    // independently during positioning and visibility, yielding two different
+    // answers while Gboard was opening/closing.
+    private fun refreshKeyboardSnapshot(): Boolean {
+        val currentWindows = try { windows } catch (_: Exception) { null }
+        val visible = if (!currentWindows.isNullOrEmpty()) {
+            currentWindows.any { it.type == AccessibilityWindowInfo.TYPE_INPUT_METHOD }
+        } else imeVisibleSignal
+        if (visible != previousKeyboardVisible) {
+            if (!visible) {
+                suggestionState.onKeyboardClosed()
+                suppressSuggestionsUntilRealEdit = false
+                lastFocusedEditorId = null
+            }
+            dismissal.onKeyboardChanged(visible)
+            previousKeyboardVisible = visible
+        }
+        keyboardVisibleCached = visible
+        return visible
+    }
+
+    private fun keyboardVisibleNow(): Boolean = keyboardVisibleCached
+
+    private fun keyboardTopPx(): Int {
+        val rect = Rect()
+        keyboardWindow()?.getBoundsInScreen(rect)
+        if (!rect.isEmpty && rect.top > 0) return rect.top
+        // Fallback for keyboards whose IME window isn't exposed.
+        return (screenH - imeBottomInsetPx).coerceAtLeast(0)
+    }
+
+    private fun onKeyboardVisibilityChanged(visible: Boolean, bottomInset: Int) {
+        if (imeVisibleSignal == visible && imeBottomInsetPx == (if (visible) bottomInset else 0)) return
+        imeVisibleSignal = visible
+        imeBottomInsetPx = if (visible) bottomInset else 0
+        updateOverlayVisibility()
+    }
+
+    /**
+     * Classify the type of focused input (text/number/PIN) without reading
+     * its contents. Gboard is the same IME app across all these layouts.
+     */
+    private fun updateEditorLayoutFromEvent(event: AccessibilityEvent) {
+        val source = event.source ?: return
+        if (!source.isEditable && !source.isPassword) return
+        val detected = KeyboardLayoutClassifier.classify(
+            source.inputType, source.isPassword
+        )
+        if (detected != activeKeyboardLayout) {
+            activeKeyboardLayout = detected
+            // A field-layout change is also a home-position transition.
+            transientPosition = null
+            transientPlacementKey = null
+            lastPlacementKey = null
             updateOverlayVisibility()
         }
     }
 
-    private fun isEditableTextField(node: AccessibilityNodeInfo): Boolean {
-        val className = node.className?.toString().orEmpty()
-        return node.isEditable || className.contains("EditText")
-    }
+    private fun activePositionProfile(): KeyboardLayoutProfile =
+        calibrationLayout ?: activeKeyboardLayout
 
-    /** Android 13+: a text field has an open input connection to this
-     * service (flagInputMethodEditor), the same one injectText types
-     * through. True whatever the app's accessibility tree says. */
-    private fun hasActiveTextInput(): Boolean {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return false
-        val method = inputMethod ?: return false
-        val inputType = method.currentInputEditorInfo?.inputType ?: return false
-        return method.currentInputStarted && inputType != InputType.TYPE_NULL
-    }
+    private fun numericKeyboardBehavior(): NumericKeyboardBehavior =
+        NumericKeyboardBehavior.fromPreference(
+            prefs().getString("numeric_keyboard_behavior", "hide")
+        )
 
-    /** The keyboard's own window is on screen. Needs
-     * flagRetrieveInteractiveWindows; without it the list is empty. */
-    private fun isKeyboardWindowShown(): Boolean =
-        try {
-            windows?.any { it.type == AccessibilityWindowInfo.TYPE_INPUT_METHOD } == true
-        } catch (e: Exception) {
-            false
+    private fun separateNumericPositions(): Boolean =
+        calibrationLayout == KeyboardLayoutProfile.NUMBER ||
+            numericKeyboardBehavior() == NumericKeyboardBehavior.SEPARATE
+
+    private fun layoutShouldHideIdleOverlay(): Boolean =
+        positionCalibrationMode == null && state == State.IDLE &&
+            keyboardVisibleNow() &&
+            (activeKeyboardLayout == KeyboardLayoutProfile.SECURE ||
+                (activeKeyboardLayout == KeyboardLayoutProfile.NUMBER &&
+                    numericKeyboardBehavior() == NumericKeyboardBehavior.HIDE))
+
+    private fun currentPlacementKey(): String =
+        activePositionProfile().name + ":" + currentMode().name + ":" + keyboardVisibleNow()
+
+    private fun clearTransientPositionOnModeChange(placementKey: String) {
+        if (placementKey != lastPlacementKey) {
+            transientPosition = null
+            transientPlacementKey = null
+            lastPlacementKey = placementKey
         }
+    }
 
-    /** Fed by the overlay view's WindowInsets listener -- catches apps whose
-     * custom composers (WhatsApp, Telegram, ...) never fire accessibility
-     * focus events at all, since this signal comes from the window manager
-     * rather than the foreground app's own accessibility tree. */
-    private fun onKeyboardVisibilityChanged(visible: Boolean) {
-        imeVisibleSignal = visible
+    private fun preferredDragBehavior(): String =
+        prefs().getString("drag_behavior", "temporary") ?: "temporary"
+
+    private fun onEditorFocusChanged(event: AccessibilityEvent) {
+        val node = event.source ?: return
+        if (!node.isEditable) return
+        // Only an editor identity token: never a word or text string.
+        val token = (node.viewIdResourceName ?: node.className?.toString().orEmpty())
+            .hashCode() xor event.windowId
+        if (lastFocusedEditorId != null && token != lastFocusedEditorId) {
+            suggestionState.onEditorChanged()
+            updateOverlayVisibility()
+        }
+        lastFocusedEditorId = token
+    }
+
+    private fun onTextFieldChanged(event: AccessibilityEvent) {
+        if (!refreshKeyboardSnapshot()) return
+        // ACTION_PASTE from OpenWhispr also emits a text-change event.
+        // Ignore our own edit and its delayed events.
+        if (android.os.SystemClock.uptimeMillis() < ignoreOwnEditsUntilMs) return
+        if (event.packageName?.toString() == packageName) return
+        // No text content read. Just the Android event type/editor class.
+        val editor = event.source
+        val editorClass = event.className?.toString().orEmpty()
+        if (editor?.isEditable != true &&
+            !editorClass.contains("EditText", ignoreCase = true)) return
+        suppressSuggestionsUntilRealEdit = false
+        suggestionState.onEdit()
         updateOverlayVisibility()
     }
 
+    private fun checkSuggestionStripOnWindowEvent() {
+        if (!refreshKeyboardSnapshot()) return
+        if (suppressSuggestionsUntilRealEdit) return
+        val now = android.os.SystemClock.uptimeMillis()
+        // UI window trees can change dozens of times per second. Throttle
+        // ONLY this optional suggestion scan, not V4's keyboard detection.
+        if (now - lastSuggestionScanUptimeMs < 120L) return
+        lastSuggestionScanUptimeMs = now
+        val ime = keyboardWindow() ?: return
+        val root = ime.root ?: return
+        try {
+            // The candidate strip may be hidden from accessibility completely.
+            // Only examine structural view IDs, never the words or labels.
+            var visibleStripFound = false
+            var recognizedContainer = false
+            var nodesVisited = 0
+            fun search(node: AccessibilityNodeInfo) {
+                if (nodesVisited++ > 180) return
+                if (SuggestionDockState.isCandidateStripId(node.viewIdResourceName)) {
+                    recognizedContainer = true
+                    if (node.isVisibleToUser) visibleStripFound = true
+                    return
+                }
+                for (i in 0 until node.childCount) {
+                    val child = node.getChild(i) ?: continue
+                    try {
+                        search(child)
+                    } finally {
+                        child.recycle()
+                    }
+                    if (visibleStripFound) return
+                }
+            }
+            search(root)
+            val before = suggestionState.shouldUseAlternativePosition
+            if (recognizedContainer) {
+                suggestionState.onRecognizedStructure(visibleStripFound)
+            } else if (suggestionState.detectionMethod == "Gboard structure" && nodesVisited <= 180) {
+                // A previously detected strip actually disappeared.
+                suggestionState.onRecognizedStructure(false)
+            }
+            if (before != suggestionState.shouldUseAlternativePosition)
+                updateOverlayVisibility()
+        } catch (e: Exception) {
+            Log.w(TAG, "Suggestion structure not exposed", e)
+        } finally {
+            root.recycle()
+        }
+    }
+
+    // Position 3 handles recording with Gboard or its suggested-word bar.
+    // Finishing recording immediately restores position 1 (no timer).
+    private fun currentMode(): MicrophoneMode = MicrophoneModeResolver.resolve(
+        keyboardVisibleNow(), state == State.RECORDING,
+        prefs().getBoolean("recording_dock_enabled", false),
+        positionCalibrationMode,
+        suggestionsBusy = activeKeyboardLayout == KeyboardLayoutProfile.TEXT &&
+            suggestionState.shouldUseAlternativePosition &&
+            !suppressSuggestionsUntilRealEdit,
+        suggestionsDockEnabled = prefs().getBoolean("suggestions_dock_enabled", false),
+        typingAction = typingAction()
+    )
+
+    private fun typingAction(): TypingAction = TypingAction.fromPreference(
+        prefs().getString("typing_action", "position3")
+    )
+
+    private fun hiddenDueToTyping(): Boolean =
+        positionCalibrationMode == null && state == State.IDLE &&
+            MicrophoneModeResolver.shouldHideForTyping(
+                keyboardVisibleNow(), recording = false,
+                suggestionsBusy = activeKeyboardLayout == KeyboardLayoutProfile.TEXT &&
+                    suggestionState.shouldUseAlternativePosition &&
+                    !suppressSuggestionsUntilRealEdit,
+                suggestionsDockEnabled = prefs().getBoolean("suggestions_dock_enabled", false),
+                typingAction = typingAction()
+            )
+
+    fun startPositionCalibration(
+        mode: MicrophoneMode,
+        layout: KeyboardLayoutProfile = KeyboardLayoutProfile.TEXT
+    ) {
+        handler.post {
+            positionCalibrationMode = mode
+            calibrationLayout = layout
+            updateOverlayVisibility()
+        }
+    }
+
+    fun finishPositionCalibration() {
+        handler.post {
+            positionCalibrationMode = null
+            calibrationLayout = null
+            updateOverlayVisibility()
+        }
+    }
+
+    fun refreshPositionPreferences() {
+        handler.post { updateOverlayVisibility() }
+    }
+
     private fun wantsOverlay(): Boolean =
-        masterEnabled() && (accessibilityFocusSignal || imeVisibleSignal || state != State.IDLE)
+        masterEnabled() && !dismissal.dismissed && !hiddenDueToTyping() &&
+            !layoutShouldHideIdleOverlay() &&
+            (positionCalibrationMode != null || keyboardVisibleNow() || state != State.IDLE)
+
+    // Existing V4/V5/V7 normal-text positions remain unchanged.
+    private fun posKey(
+        mode: MicrophoneMode, axis: String,
+        profile: KeyboardLayoutProfile = activePositionProfile()
+    ): String {
+        val base = when (mode) {
+            MicrophoneMode.KEYBOARD -> "v3_dock_" + axis + "_fraction"
+            MicrophoneMode.FLOATING -> "v3_float_" + axis + "_fraction"
+            MicrophoneMode.RECORDING_DOCK -> "v5_recording_dock_" + axis + "_fraction"
+            MicrophoneMode.TYPING_DOCK -> "v7_typing_dock_" + axis + "_fraction"
+        }
+        return if (profile == KeyboardLayoutProfile.NUMBER && separateNumericPositions())
+            "v8_numeric_" + base
+        else base
+    }
+
+    private fun positionForMode(mode: MicrophoneMode, size: Int): BubbleSize.Position {
+        val defaultX = when (mode) {
+            MicrophoneMode.KEYBOARD -> ((screenW - (DOCK_RIGHT_DP * dp).toInt() - size).toFloat() /
+                (screenW - size).coerceAtLeast(1)).coerceIn(0f, 1f)
+            MicrophoneMode.FLOATING -> 0.85f
+            MicrophoneMode.RECORDING_DOCK -> 0.05f
+            MicrophoneMode.TYPING_DOCK -> 0.04f
+        }
+        val defaultY = when (mode) {
+            MicrophoneMode.KEYBOARD -> {
+                val target = keyboardTopPx() + (DOCK_TOP_DP * dp).toInt()
+                (target.toFloat() / (screenH - size).coerceAtLeast(1)).coerceIn(0f, 1f)
+            }
+            MicrophoneMode.FLOATING -> 0.5f
+            MicrophoneMode.RECORDING_DOCK -> 0.46f
+            MicrophoneMode.TYPING_DOCK -> 0.35f
+        }
+        val currentX = posKey(mode, "x")
+        val currentY = posKey(mode, "y")
+        val fallbackX = posKey(mode, "x", KeyboardLayoutProfile.TEXT)
+        val fallbackY = posKey(mode, "y", KeyboardLayoutProfile.TEXT)
+        // If no custom number layout spot has been chosen, use the normal
+        // text location rather than unexpectedly resetting to a corner.
+        val x = prefs().getFloat(currentX, prefs().getFloat(fallbackX, defaultX))
+        val y = prefs().getFloat(currentY, prefs().getFloat(fallbackY, defaultY))
+        return OverlayPlacement.restore(
+            OverlayPlacement.Fractions(x, y), screenW, screenH, size, 0
+        )
+    }
+
+    private fun rememberPosition(
+        mode: MicrophoneMode, x: Int, y: Int, size: Int,
+        profile: KeyboardLayoutProfile = activePositionProfile()
+    ) {
+        val f = OverlayPlacement.remember(x, y, screenW, screenH, size)
+        prefs().edit()
+            .putFloat(posKey(mode, "x", profile), f.x)
+            .putFloat(posKey(mode, "y", profile), f.y)
+            .apply()
+    }
+
+    private fun dockOverlayToKeyboard() {
+        if (isDraggingOverlay) return
+        val lp = layoutParams ?: return
+        val view = overlayView ?: return
+        val wm = getSystemService(WINDOW_SERVICE) as WindowManager
+        val key = currentPlacementKey()
+        clearTransientPositionOnModeChange(key)
+        val pos = if (transientPlacementKey == key) transientPosition
+            ?: positionForMode(currentMode(), lp.width)
+        else positionForMode(currentMode(), lp.width)
+        if (lp.x == pos.x && lp.y == pos.y) return
+        lp.x = pos.x
+        lp.y = pos.y
+        try {
+            wm.updateViewLayout(view, lp)
+            feedbackLayoutParams?.let { feedback ->
+                positionFeedback(feedback, lp)
+                feedbackView?.let { wm.updateViewLayout(it, feedback) }
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Dock reposition failed", e)
+        }
+    }
+
+    private fun hideIdleFeedback() {
+        handler.removeCallbacks(hideFeedback)
+        feedbackView?.animate()?.cancel()
+        feedbackView?.visibility = View.GONE
+        feedbackView?.alpha = 0f
+    }
 
     private fun updateOverlayVisibility() {
+        refreshKeyboardSnapshot()
+        if (!dismissal.dismissed) dockOverlayToKeyboard()
         val shouldShow = wantsOverlay()
-        handler.removeCallbacks(overlayVisibilityDebounce)
         if (shouldShow == overlayShown) {
-            // Self-heal: the view can drift from overlayShown (e.g. after an app
-            // switch), leaving it hidden while it should show. Re-show it here.
             if (shouldShow && overlayView?.visibility != View.VISIBLE) animateOverlayIn()
             return
         }
-        // Only act once the new state has held for OVERLAY_DEBOUNCE_MS, so rapid
-        // focus flapping between apps doesn't restart the fades.
-        handler.postDelayed(overlayVisibilityDebounce, OVERLAY_DEBOUNCE_MS)
-    }
-
-    private val overlayVisibilityDebounce = Runnable { applyOverlayVisibility() }
-
-    private fun applyOverlayVisibility() {
-        val shouldShow = wantsOverlay()
-        if (shouldShow == overlayShown) return
         overlayShown = shouldShow
         if (shouldShow) animateOverlayIn() else animateOverlayOut()
     }
 
     private fun masterEnabled() = prefs().getBoolean("service_master_enabled", true)
 
-    /** Called from MainActivity when the "Background service" switch is
-     * toggled, so an already-idle overlay hides/shows immediately instead
-     * of waiting for the next focus event or poll tick. */
     fun refreshMasterEnabled() {
         handler.post { updateOverlayVisibility() }
     }
 
-    /** Shows the overlay at its target alpha immediately. No fade-in: an
-     * animation on a window the system hasn't drawn yet can stall at alpha 0. */
     private fun animateOverlayIn() {
-        handler.post {
-            val view = overlayView ?: return@post
-            view.animate().cancel()
-            view.visibility = View.VISIBLE
-            setTouchable(true)
-            view.alpha = if (state == State.IDLE) ALPHA_IDLE else ALPHA_ACTIVE
-        }
+        val view = overlayView ?: return
+        view.animate().cancel()
+        view.visibility = View.VISIBLE
+        setTouchable(true)
+        view.alpha = if (state == State.IDLE) ALPHA_IDLE else ALPHA_ACTIVE
     }
 
     private fun animateOverlayOut() {
-        handler.post {
-            val view = overlayView ?: return@post
-            view.animate().cancel()
-            view.animate()
-                .alpha(0f)
-                .setDuration(FADE_OUT_MS)
-                .setInterpolator(AccelerateInterpolator())
-                .withEndAction {
-                    view.visibility = View.INVISIBLE
-                    setTouchable(false)
-                }
-                .start()
-        }
+        val view = overlayView ?: return
+        view.animate().cancel()
+        // No animation and no pending runnable: keyboard closed means gone.
+        view.visibility = View.INVISIBLE
+        view.alpha = 0f
+        setTouchable(false)
+        if (state == State.IDLE) hideIdleFeedback()
     }
 
     private fun setTouchable(touchable: Boolean) {
@@ -422,7 +724,9 @@ class WhisperAccessibilityService : AccessibilityService() {
                 val lp = layoutParams ?: return@post
                 val wm = getSystemService(WINDOW_SERVICE) as WindowManager
                 val dimensions = BubbleSize.dimensions(currentBubbleSizePercent())
-                val ringSize = (dimensions.ringDp * dp).toInt()
+                val ringSize = minOf((dimensions.ringDp * dp).toInt(), screenW / 2)
+                val buttonSize = (ringSize * BubbleSize.BUTTON_DP / BubbleSize.RING_DP.toFloat()).toInt()
+                val padPx = (ringSize * BubbleSize.PADDING_DP / BubbleSize.RING_DP.toFloat()).toInt()
                 val margin = (MARGIN_DP * dp).toInt()
                 val position = BubbleSize.clampPosition(
                     lp.x, lp.y, screenW, screenH, ringSize, margin
@@ -438,18 +742,15 @@ class WhisperAccessibilityService : AccessibilityService() {
                     spinner?.layoutParams = ringParams
                 }
                 (button?.layoutParams as? FrameLayout.LayoutParams)?.let { buttonParams ->
-                    val buttonSize = (dimensions.buttonDp * dp).toInt()
                     buttonParams.width = buttonSize
                     buttonParams.height = buttonSize
                     button?.layoutParams = buttonParams
                 }
                 button?.setPadding(
-                    (dimensions.paddingDp * dp).toInt(),
-                    (dimensions.paddingDp * dp).toInt(),
-                    (dimensions.paddingDp * dp).toInt(),
-                    (dimensions.paddingDp * dp).toInt()
+                    padPx, padPx, padPx, padPx
                 )
                 wm.updateViewLayout(view, lp)
+                dockOverlayToKeyboard()
 
                 feedbackLayoutParams?.let { feedbackParams ->
                     positionFeedback(feedbackParams, lp)
@@ -475,7 +776,7 @@ class WhisperAccessibilityService : AccessibilityService() {
                 val view = overlayView ?: return@post
                 val lp = layoutParams ?: return@post
                 val wm = getSystemService(WINDOW_SERVICE) as WindowManager
-                val position = savedHomePosition(lp.width)
+                val position = positionForMode(currentMode(), lp.width)
                 lp.x = position.x
                 lp.y = position.y
                 wm.updateViewLayout(view, lp)
@@ -555,14 +856,93 @@ class WhisperAccessibilityService : AccessibilityService() {
         }
     )
 
+    // A transient, non-touchable drop target: the drag stays owned by the
+    // microphone and the target does not steal taps from Gboard.
+    private fun dismissZoneCenter(): Pair<Float, Float> =
+        Pair(screenW / 2f, screenH - (70 * dp))
+
+    private fun isDismissZone(rawX: Float, rawY: Float): Boolean {
+        val (cx, cy) = dismissZoneCenter()
+        val radius = 58 * dp
+        return (rawX - cx) * (rawX - cx) + (rawY - cy) * (rawY - cy) <= radius * radius
+    }
+
+    private fun ensureDismissTarget() {
+        if (dismissTargetView != null || positionCalibrationMode != null) return
+        try {
+            val wm = getSystemService(WINDOW_SERVICE) as WindowManager
+            val size = (76 * dp).toInt()
+            val (cx, cy) = dismissZoneCenter()
+            val params = WindowManager.LayoutParams(
+                size, size,
+                WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
+                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                    WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE,
+                PixelFormat.TRANSLUCENT
+            ).apply {
+                gravity = Gravity.TOP or Gravity.START
+                x = (cx - size / 2).toInt()
+                y = (cy - size / 2).toInt()
+            }
+            val target = TextView(this).apply {
+                text = "✕\nClose"
+                gravity = Gravity.CENTER
+                textSize = 13f
+                setTextColor(Color.WHITE)
+                background = circle(0xEE782828.toInt(), 0xFFFFB4B4.toInt(), (2 * dp).toInt())
+            }
+            wm.addView(target, params)
+            dismissTargetView = target
+            dismissTargetParams = params
+        } catch (e: Exception) {
+            Log.w(TAG, "Dismiss target could not be displayed", e)
+        }
+    }
+
+    private fun updateDismissTarget(rawX: Float, rawY: Float) {
+        if (positionCalibrationMode != null) return
+        val target = dismissTargetView ?: return
+        val inside = isDismissZone(rawX, rawY)
+        if (inside == isInsideDismissZone) return
+        isInsideDismissZone = inside
+        target.alpha = if (inside) 1f else 0.62f
+        target.scaleX = if (inside) 1.16f else 1f
+        target.scaleY = if (inside) 1.16f else 1f
+    }
+
+    private fun removeDismissTarget() {
+        isInsideDismissZone = false
+        val target = dismissTargetView ?: return
+        dismissTargetView = null
+        dismissTargetParams = null
+        try {
+            (getSystemService(WINDOW_SERVICE) as WindowManager).removeView(target)
+        } catch (e: Exception) {
+            Log.w(TAG, "Dismiss target cleanup failed", e)
+        }
+    }
+
+    private fun dismissMicrophone() {
+        // Do not reset the user's configured positions or recording controls.
+        // Reappear only after the next keyboard CLOSED -> OPEN event.
+        dismissal.dismiss(keyboardVisibleNow())
+        if (state == State.RECORDING) {
+            clipboardOnlySession = true
+            stopAndTranscribe()
+        } else if (state == State.TRANSCRIBING) {
+            clipboardOnlySession = true
+        }
+        updateOverlayVisibility()
+    }
+
     // --- Overlay ---
 
     private fun showOverlay() {
         val wm = getSystemService(WINDOW_SERVICE) as WindowManager
         val dimensions = BubbleSize.dimensions(currentBubbleSizePercent())
-        val buttonSize = (dimensions.buttonDp * dp).toInt()
-        val ringSize = (dimensions.ringDp * dp).toInt()
-        val pad = (dimensions.paddingDp * dp).toInt()
+        val ringSize = minOf((dimensions.ringDp * dp).toInt(), screenW / 2)
+        val buttonSize = (ringSize * BubbleSize.BUTTON_DP / BubbleSize.RING_DP.toFloat()).toInt()
+        val pad = (ringSize * BubbleSize.PADDING_DP / BubbleSize.RING_DP.toFloat()).toInt()
         val margin = (MARGIN_DP * dp).toInt()
 
         val ring = ProgressBar(this).apply {
@@ -583,13 +963,18 @@ class WhisperAccessibilityService : AccessibilityService() {
             addView(img, FrameLayout.LayoutParams(buttonSize, buttonSize, Gravity.CENTER))
             contentDescription = getString(R.string.overlay_content_description)
             importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_YES
-            isFocusable = true
+            // Remove Android's default rectangular focus highlight without
+            // changing the circular microphone or accessibility description.
+            isFocusable = false
+            defaultFocusHighlightEnabled = false
+            setBackgroundColor(Color.TRANSPARENT)
             setOnClickListener { onTap() }
             alpha = 0f
             visibility = View.INVISIBLE
             setOnApplyWindowInsetsListener { _, insets ->
                 try {
-                    onKeyboardVisibilityChanged(insets.isVisible(WindowInsets.Type.ime()))
+                    val ime = insets.getInsets(WindowInsets.Type.ime())
+                    onKeyboardVisibilityChanged(insets.isVisible(WindowInsets.Type.ime()), ime.bottom)
                 } catch (e: Exception) {
                     Log.e(TAG, "IME insets check failed", e)
                 }
@@ -604,7 +989,7 @@ class WhisperAccessibilityService : AccessibilityService() {
             PixelFormat.TRANSLUCENT
         ).apply {
             gravity = Gravity.TOP or Gravity.START
-            val home = savedHomePosition(ringSize)
+            val home = positionForMode(currentMode(), ringSize)
             x = home.x
             y = home.y
         }
@@ -615,43 +1000,77 @@ class WhisperAccessibilityService : AccessibilityService() {
         overlay.setOnTouchListener { v, ev ->
             when (ev.action) {
                 MotionEvent.ACTION_DOWN -> {
-                    startX = params.x; startY = params.y
-                    touchX = ev.rawX; touchY = ev.rawY
+                    dragAllowedForGesture = positionCalibrationMode != null ||
+                        !prefs().getBoolean("positions_locked", false)
+                    isDraggingOverlay = true
+                    gestureStartedWithKeyboard = keyboardVisibleNow()
+                    gestureStartedMode = currentMode()
+                    gestureStartedLayout = activePositionProfile()
+                    startX = params.x
+                    startY = params.y
+                    touchX = ev.rawX
+                    touchY = ev.rawY
                     true
                 }
                 MotionEvent.ACTION_MOVE -> {
+                    val moved = abs(ev.rawX - touchX) + abs(ev.rawY - touchY)
+                    if (moved >= 12f * dp && positionCalibrationMode == null) {
+                        ensureDismissTarget()
+                        updateDismissTarget(ev.rawX, ev.rawY)
+                    }
+                    // Lock blocks saving new positions but never prevents
+                    // deliberate dragging to the Close target.
                     val position = BubbleSize.clampPosition(
                         startX + (ev.rawX - touchX).toInt(),
                         startY + (ev.rawY - touchY).toInt(),
-                        screenW,
-                        screenH,
-                        params.width,
-                        margin
+                        screenW, screenH, params.width, 0
                     )
                     params.x = position.x
                     params.y = position.y
                     wm.updateViewLayout(v, params)
                     feedbackLayoutParams?.let {
                         positionFeedback(it, params)
-                        wm.updateViewLayout(feedbackView, it)
+                        feedbackView?.let { f -> wm.updateViewLayout(f, it) }
                     }
                     true
                 }
                 MotionEvent.ACTION_UP -> {
                     val moved = abs(ev.rawX - touchX) + abs(ev.rawY - touchY)
-                    if (moved < BubbleSize.dimensions(currentBubbleSizePercent()).tapThresholdDp * dp) {
-                        v.performClick()
+                    val closing = positionCalibrationMode == null &&
+                        moved > 12f * dp && isDismissZone(ev.rawX, ev.rawY)
+                    removeDismissTarget()
+                    isDraggingOverlay = false
+                    if (closing) {
+                        dismissMicrophone()
                     } else {
-                        params.x = BubbleSize.snappedX(params.x, params.width, screenW, margin)
-                        params.y = BubbleSize.clampPosition(
-                            params.x, params.y, screenW, screenH, params.width, margin
-                        ).y
-                        wm.updateViewLayout(v, params)
-                        feedbackLayoutParams?.let {
-                            positionFeedback(it, params)
-                            wm.updateViewLayout(feedbackView, it)
+                        if (moved < BubbleSize.dimensions(currentBubbleSizePercent()).tapThresholdDp * dp) {
+                            if (positionCalibrationMode == null) v.performClick()
+                        } else {
+                            // Moving is always allowed, even when positions are
+                            // locked. Only calibration or explicit Save behavior
+                            // overwrites a remembered home location.
+                            if (positionCalibrationMode != null ||
+                                (dragAllowedForGesture && preferredDragBehavior() == "save")) {
+                                rememberPosition(
+                                    gestureStartedMode, params.x, params.y,
+                                    params.width, gestureStartedLayout
+                                )
+                            } else {
+                                val key = currentPlacementKey()
+                                transientPosition = BubbleSize.Position(params.x, params.y)
+                                transientPlacementKey = key
+                            }
                         }
+                        updateOverlayVisibility()
                     }
+                    dragAllowedForGesture = false
+                    true
+                }
+                MotionEvent.ACTION_CANCEL -> {
+                    removeDismissTarget()
+                    isDraggingOverlay = false
+                    dragAllowedForGesture = false
+                    updateOverlayVisibility()
                     true
                 }
                 else -> false
@@ -686,6 +1105,7 @@ class WhisperAccessibilityService : AccessibilityService() {
         feedbackView = feedback
         layoutParams = params
         feedbackLayoutParams = feedbackParams
+        updateOverlayVisibility()
     }
 
     private fun removeOverlay() {
@@ -750,10 +1170,7 @@ class WhisperAccessibilityService : AccessibilityService() {
     private fun setOpacity(active: Boolean) {
         handler.post {
             overlayView?.animate()?.cancel()
-            overlayView?.animate()
-                ?.alpha(if (active) ALPHA_ACTIVE else ALPHA_IDLE)
-                ?.setDuration(ALPHA_FADE_MS)
-                ?.start()
+            overlayView?.alpha = if (active) ALPHA_ACTIVE else ALPHA_IDLE
         }
     }
 
@@ -975,6 +1392,17 @@ class WhisperAccessibilityService : AccessibilityService() {
             return
         }
 
+        // Close-target dismissal always copies the raw recognized transcript,
+        // never executes commands, edits an app, or injects text.
+        if (clipboardOnlySession) {
+            handler.post {
+                copyToClipboard(text)
+                toast("Dictation copied to clipboard")
+                goIdle()
+            }
+            return
+        }
+
         val voiceCommandsEnabled = prefs().getBoolean("voice_commands_enabled", false)
         if (voiceCommandsEnabled) {
             val trigger = prefs().getString("command_trigger_phrase", getString(R.string.default_trigger_phrase))
@@ -1076,6 +1504,11 @@ class WhisperAccessibilityService : AccessibilityService() {
         CommandProcessor.process(fieldText, instruction, apiKey) { result ->
             handler.post {
                 val out = result.text?.trim()
+                if (clipboardOnlySession) {
+                    if (!out.isNullOrBlank()) copyToClipboard(out)
+                    goIdle()
+                    return@post
+                }
                 when {
                     out.isNullOrBlank() ->
                         toast(getString(R.string.command_failed, result.error ?: getString(R.string.empty_response)))
@@ -1106,6 +1539,11 @@ class WhisperAccessibilityService : AccessibilityService() {
      * instead of inserting at the cursor/selection -- used by voice
      * commands, which transform the whole field rather than append to it. */
     private fun replaceFieldText(text: String) {
+        markOwnTextInsertion()
+        if (clipboardOnlySession) {
+            copyToClipboard(text)
+            return
+        }
         val candidates = findInjectionCandidates()
         var replaced = false
         try {
@@ -1151,11 +1589,20 @@ class WhisperAccessibilityService : AccessibilityService() {
 
     private fun goIdle() {
         state = State.IDLE
+        clipboardOnlySession = false
         setBusy(false)
         setRecordingLook(false) // [ui]
         setIcon(R.drawable.ic_app_logo)
         setOpacity(active = false)
         updateOverlayVisibility()
+    }
+
+    private fun markOwnTextInsertion() {
+        // Metadata only: ignore text-change events caused by our own paste.
+        ignoreOwnEditsUntilMs = android.os.SystemClock.uptimeMillis() + 1600L
+        suppressSuggestionsUntilRealEdit = true
+        suggestionState.onKeyboardClosed()
+        handler.post { updateOverlayVisibility() }
     }
 
     // --- Text injection ---
@@ -1171,7 +1618,11 @@ class WhisperAccessibilityService : AccessibilityService() {
         feedback: String? = getString(R.string.copied_to_clipboard),
         feedbackDurationMs: Long = 2000
     ): Boolean {
+        markOwnTextInsertion()
         copyToClipboard(text)
+        // Final safety gate: even asynchronous cleanup/command callbacks must
+        // never paste after a user drags the mic into Close.
+        if (clipboardOnlySession) return false
 
         val candidates = findInjectionCandidates()
         Log.i(TAG, "Injecting text into ${candidates.size} candidate node(s)")

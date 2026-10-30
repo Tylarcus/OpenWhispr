@@ -1,8 +1,8 @@
 name: Build APK
 
 on:
-  push:
-    branches: [ main ]
+  # Legacy upstream release workflow retained for reference and manual use.
+  # Personal signed APKs are built by gboard-dock-test.yml on main.
   workflow_dispatch: {}
 
 permissions:

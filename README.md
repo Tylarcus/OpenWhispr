@@ -1,10 +1,32 @@
+# OpenWhispr — Personal Gboard Dock Fork
+
+This repository is an independently maintained Android fork of [EdiBianco/OpenWhispr](https://github.com/EdiBianco/OpenWhispr), based on its Apache 2.0 licensed source code. Thanks to the upstream project for its transcription engine and original application.
+
+**Maintained source:** `main`. **Installable APKs:** [this fork's Releases page](https://github.com/Tylarcus/OpenWhispr/releases). The personal app uses package `com.edib.openwhispr.docktest` and its own persistent private signing key, so it can coexist with the official app and future signed builds can update in place.
+
+### What this fork changes
+
+- Four independent, full-screen positions for microphone overlays, including dictation and typing modes
+- Responsive Gboard detection, optional suggestions behavior and configurable numeric-keypad handling
+- Size control in 1% increments; configurable drag-to-move and lock-home behaviors
+- Drag-to-dismiss target, with clipboard-only transcription when closed during recording
+- Independent, GitHub Actions signed Android builds using a protected repository secret
+
+**Release notes:** This is a personal experimental build, not an official OpenWhispr release. Android and different keyboards can expose accessibility state inconsistently. Signed releases require the private `DOCK_TEST_KEYSTORE_BASE64` repository secret; do not share its contents.
+
+---
+
+## Upstream documentation
+
+The following documentation originated with the upstream OpenWhispr project. Some descriptions, screenshots, and release links may describe the upstream version rather than this fork.
+
 <p align="center">
   <img src="docs/logo.svg" width="128" height="128" alt="OpenWispr Logo">
 </p>
 
 # OpenWispr
 
-[![Download APK - Latest Version](https://img.shields.io/github/v/release/EdiBianco/OpenWhispr?label=Download%20APK&logo=android)](https://github.com/EdiBianco/OpenWhispr/releases/latest)
+[Download personal signed APKs](https://github.com/Tylarcus/OpenWhispr/releases) · [Original upstream releases](https://github.com/EdiBianco/OpenWhispr/releases)
 
 Free, open-source, on-device push-to-talk dictation for Android — a free alternative to [Wispr Flow](https://wisprflow.ai).
 
