@@ -102,6 +102,7 @@ class WhisperAccessibilityService : AccessibilityService() {
     private var imeVisibleSignal = false
     private var imeBottomInsetPx = 0
     private var isDraggingOverlay = false
+    private var gestureStartedWithKeyboard = false
     private var button: ImageView? = null
     // [ui] Smoothed recording level for the voice-reactive overlay (main thread).
     private var audioLevel = 0f
@@ -335,38 +336,35 @@ class WhisperAccessibilityService : AccessibilityService() {
     private fun wantsOverlay(): Boolean =
         masterEnabled() && (keyboardVisibleNow() || state != State.IDLE)
 
-    // Two saved positions: inside the keyboard, and floating when recording
-    // outside the keyboard. Coordinates use fractions for orientation changes.
+    // Full-screen coordinates for both modes, unaffected by IME bounds.
+    // V3 keys intentionally differ from V2: V2 stored keyboard-relative Y,
+    // which cannot be interpreted as full-display Y without migration data.
     private fun posKey(keyboard: Boolean, axis: String): String =
-        (if (keyboard) "dock_" else "float_") + axis + "_fraction"
+        (if (keyboard) "v3_dock_" else "v3_float_") + axis + "_fraction"
 
     private fun positionForMode(keyboard: Boolean, size: Int): BubbleSize.Position {
-        val top = if (keyboard) keyboardTopPx() else 0
-        val regionH = if (keyboard) (screenH - top).coerceAtLeast(1) else screenH
         val defaultX = if (keyboard) {
             ((screenW - (DOCK_RIGHT_DP * dp).toInt() - size).toFloat() /
                 (screenW - size).coerceAtLeast(1)).coerceIn(0f, 1f)
         } else 0.85f
         val defaultY = if (keyboard) {
-            (DOCK_TOP_DP * dp / (regionH - size).coerceAtLeast(1)).coerceIn(0f, 1f)
+            val target = keyboardTopPx() + (DOCK_TOP_DP * dp).toInt()
+            (target.toFloat() / (screenH - size).coerceAtLeast(1)).coerceIn(0f, 1f)
         } else 0.5f
-        val x = prefs().getFloat(posKey(keyboard, "x"), defaultX).coerceIn(0f, 1f)
-        val y = prefs().getFloat(posKey(keyboard, "y"), defaultY).coerceIn(0f, 1f)
-        return BubbleSize.clampPosition(
-            (x * (screenW - size).coerceAtLeast(0)).toInt(),
-            top + (y * (regionH - size).coerceAtLeast(0)).toInt(),
+        val x = prefs().getFloat(posKey(keyboard, "x"), defaultX)
+        val y = prefs().getFloat(posKey(keyboard, "y"), defaultY)
+        return OverlayPlacement.restore(
+            OverlayPlacement.Fractions(x, y),
             screenW, screenH, size, (MARGIN_DP * dp).toInt()
         )
     }
 
     private fun rememberPosition(keyboard: Boolean, x: Int, y: Int, size: Int) {
-        val top = if (keyboard) keyboardTopPx() else 0
-        val regionH = if (keyboard) (screenH - top).coerceAtLeast(1) else screenH
-        val fx = (x.toFloat() / (screenW - size).coerceAtLeast(1)).coerceIn(0f, 1f)
-        val fy = ((y - top).toFloat() / (regionH - size).coerceAtLeast(1))
-            .coerceIn(0f, 1f)
-        prefs().edit().putFloat(posKey(keyboard, "x"), fx)
-            .putFloat(posKey(keyboard, "y"), fy).apply()
+        val f = OverlayPlacement.remember(x, y, screenW, screenH, size)
+        prefs().edit()
+            .putFloat(posKey(keyboard, "x"), f.x)
+            .putFloat(posKey(keyboard, "y"), f.y)
+            .apply()
     }
 
     private fun dockOverlayToKeyboard() {
@@ -651,6 +649,7 @@ class WhisperAccessibilityService : AccessibilityService() {
             when (ev.action) {
                 MotionEvent.ACTION_DOWN -> {
                     isDraggingOverlay = true
+                    gestureStartedWithKeyboard = keyboardVisibleNow()
                     startX = params.x; startY = params.y
                     touchX = ev.rawX; touchY = ev.rawY
                     true
@@ -678,7 +677,7 @@ class WhisperAccessibilityService : AccessibilityService() {
                     if (moved < BubbleSize.dimensions(currentBubbleSizePercent()).tapThresholdDp * dp) {
                         v.performClick()
                     } else {
-                        rememberPosition(keyboardVisibleNow(), params.x, params.y, params.width)
+                        rememberPosition(gestureStartedWithKeyboard, params.x, params.y, params.width)
                     }
                     isDraggingOverlay = false
                     updateOverlayVisibility()
