@@ -3,7 +3,7 @@ name: Gboard Dock Test APK
 on:
   push:
     branches:
-      - feature/gboard-dock-v8
+      - feature/gboard-dock-stable-signing
   workflow_dispatch:
 
 permissions:
@@ -30,12 +30,26 @@ jobs:
           yes | "$SDKMANAGER" --licenses > /dev/null || true
           "$SDKMANAGER" "platforms;android-35" "build-tools;35.0.0"
 
+      - name: Restore permanent private debug signing key
+        env:
+          DOCK_SIGNING_KEY: ${{ secrets.DOCK_TEST_KEYSTORE_BASE64 }}
+        run: |
+          if [ -z "$DOCK_SIGNING_KEY" ]; then
+            echo "::error::Set repository secret DOCK_TEST_KEYSTORE_BASE64 before the first upgradeable build"
+            exit 1
+          fi
+          printf '%s' "$DOCK_SIGNING_KEY" | base64 --decode > dock-test-signing.p12
+          keytool -list -storetype PKCS12 -keystore dock-test-signing.p12 -alias docktest -storepass 'OpenWhisprDockTest2026!' > /dev/null
+          echo "Stable test signing key verified; contents never printed."
+
       - name: Run microphone placement tests
         run: |
           chmod +x ./gradlew
           ./gradlew testDebugUnitTest --no-daemon
 
       - name: Build separately-installable debug APK
+        env:
+          DOCK_TEST_BUILD_NUMBER: ${{ github.run_number }}
         run: |
           chmod +x ./gradlew
           ./gradlew assembleDebug --no-daemon
@@ -51,11 +65,11 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "gboard-dock-v8-test" \
-            "app/build/outputs/apk/debug/app-debug.apk#OpenWhispr-Gboard-Dock-Test-v8.apk" \
+          gh release create "gboard-dock-signed-v1-test" \
+            "app/build/outputs/apk/debug/app-debug.apk#OpenWhispr-Gboard-Dock-Signed-Test-v1.apk" \
             --repo "${{ github.repository }}" \
             --target "${{ github.sha }}" \
-            --title "Gboard Dock Test V8 (experimental debug APK)" \
+            --title "Gboard Dock Signed Test V1 (experimental debug APK)" \
             --notes "Experimental keyboard-docking build. Not tested on physical hardware. Uses applicationId com.edib.openwhispr.docktest, so it does not overwrite the official OpenWhispr app. Disable the original accessibility service while trying the test build." \
             --prerelease \
             --latest=false
