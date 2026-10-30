@@ -20,6 +20,25 @@ class KeyboardLayoutProfileTest {
             KeyboardLayoutClassifier.classify(InputType.TYPE_CLASS_PHONE, false))
     }
 
+    @Test fun htmlTextInputmodeNumericViaAriaLabelIsRecognized() {
+        // Iron Shrine AMRAP currently uses type="text" inputmode="numeric".
+        assertEquals(KeyboardLayoutProfile.NUMBER,
+            KeyboardLayoutClassifier.classify(
+                InputType.TYPE_CLASS_TEXT, false, "Enter completed reps"))
+        assertEquals(KeyboardLayoutProfile.NUMBER,
+            KeyboardLayoutClassifier.classify(
+                InputType.TYPE_CLASS_TEXT, false, "Type completed repetitions"))
+        assertEquals(KeyboardLayoutProfile.TEXT,
+            KeyboardLayoutClassifier.classify(
+                InputType.TYPE_CLASS_TEXT, false, "Search the web"))
+    }
+
+    @Test fun htmlPinLabelCanHideEvenIfEditorClaimsText() {
+        assertEquals(KeyboardLayoutProfile.SECURE,
+            KeyboardLayoutClassifier.classify(
+                InputType.TYPE_CLASS_TEXT, false, "Enter your four digit PIN"))
+    }
+
     @Test fun pinAndPasswordsUseSecureProfile() {
         assertEquals(KeyboardLayoutProfile.SECURE,
             KeyboardLayoutClassifier.classify(
