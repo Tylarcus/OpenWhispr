@@ -711,6 +711,85 @@ class WhisperAccessibilityService : AccessibilityService() {
         }
     )
 
+    // A transient, non-touchable drop target: the drag stays owned by the
+    // microphone and the target does not steal taps from Gboard.
+    private fun dismissZoneCenter(): Pair<Float, Float> =
+        Pair(screenW / 2f, screenH - (70 * dp))
+
+    private fun isDismissZone(rawX: Float, rawY: Float): Boolean {
+        val (cx, cy) = dismissZoneCenter()
+        val radius = 58 * dp
+        return (rawX - cx) * (rawX - cx) + (rawY - cy) * (rawY - cy) <= radius * radius
+    }
+
+    private fun ensureDismissTarget() {
+        if (dismissTargetView != null || positionCalibrationMode != null) return
+        try {
+            val wm = getSystemService(WINDOW_SERVICE) as WindowManager
+            val size = (76 * dp).toInt()
+            val (cx, cy) = dismissZoneCenter()
+            val params = WindowManager.LayoutParams(
+                size, size,
+                WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
+                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                    WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE,
+                PixelFormat.TRANSLUCENT
+            ).apply {
+                gravity = Gravity.TOP or Gravity.START
+                x = (cx - size / 2).toInt()
+                y = (cy - size / 2).toInt()
+            }
+            val target = TextView(this).apply {
+                text = "✕\\nClose"
+                gravity = Gravity.CENTER
+                textSize = 13f
+                setTextColor(Color.WHITE)
+                background = circle(0xEE782828.toInt(), 0xFFFFB4B4.toInt(), (2 * dp).toInt())
+            }
+            wm.addView(target, params)
+            dismissTargetView = target
+            dismissTargetParams = params
+        } catch (e: Exception) {
+            Log.w(TAG, "Dismiss target could not be displayed", e)
+        }
+    }
+
+    private fun updateDismissTarget(rawX: Float, rawY: Float) {
+        if (positionCalibrationMode != null) return
+        val target = dismissTargetView ?: return
+        val inside = isDismissZone(rawX, rawY)
+        if (inside == isInsideDismissZone) return
+        isInsideDismissZone = inside
+        target.alpha = if (inside) 1f else 0.62f
+        target.scaleX = if (inside) 1.16f else 1f
+        target.scaleY = if (inside) 1.16f else 1f
+    }
+
+    private fun removeDismissTarget() {
+        isInsideDismissZone = false
+        val target = dismissTargetView ?: return
+        dismissTargetView = null
+        dismissTargetParams = null
+        try {
+            (getSystemService(WINDOW_SERVICE) as WindowManager).removeView(target)
+        } catch (e: Exception) {
+            Log.w(TAG, "Dismiss target cleanup failed", e)
+        }
+    }
+
+    private fun dismissMicrophone() {
+        // Do not reset the user's configured positions or recording controls.
+        // Reappear only after the next keyboard CLOSED -> OPEN event.
+        dismissal.dismiss(keyboardVisibleNow())
+        if (state == State.RECORDING) {
+            clipboardOnlySession = true
+            stopAndTranscribe()
+        } else if (state == State.TRANSCRIBING) {
+            clipboardOnlySession = true
+        }
+        updateOverlayVisibility()
+    }
+
     // --- Overlay ---
 
     private fun showOverlay() {
@@ -778,46 +857,58 @@ class WhisperAccessibilityService : AccessibilityService() {
                 MotionEvent.ACTION_DOWN -> {
                     dragAllowedForGesture = positionCalibrationMode != null ||
                         !prefs().getBoolean("positions_locked", false)
-                    isDraggingOverlay = dragAllowedForGesture
+                    isDraggingOverlay = true
                     gestureStartedWithKeyboard = keyboardVisibleNow()
                     gestureStartedMode = currentMode()
-                    startX = params.x; startY = params.y
-                    touchX = ev.rawX; touchY = ev.rawY
+                    startX = params.x
+                    startY = params.y
+                    touchX = ev.rawX
+                    touchY = ev.rawY
                     true
                 }
                 MotionEvent.ACTION_MOVE -> {
-                    if (!dragAllowedForGesture) return@setOnTouchListener true
+                    val moved = abs(ev.rawX - touchX) + abs(ev.rawY - touchY)
+                    if (moved >= 12f * dp && positionCalibrationMode == null) {
+                        ensureDismissTarget()
+                        updateDismissTarget(ev.rawX, ev.rawY)
+                    }
+                    // Lock blocks saving new positions but never prevents
+                    // deliberate dragging to the Close target.
                     val position = BubbleSize.clampPosition(
                         startX + (ev.rawX - touchX).toInt(),
                         startY + (ev.rawY - touchY).toInt(),
-                        screenW,
-                        screenH,
-                        params.width,
-                        margin
+                        screenW, screenH, params.width, margin
                     )
                     params.x = position.x
                     params.y = position.y
                     wm.updateViewLayout(v, params)
                     feedbackLayoutParams?.let {
                         positionFeedback(it, params)
-                        wm.updateViewLayout(feedbackView, it)
+                        feedbackView?.let { f -> wm.updateViewLayout(f, it) }
                     }
                     true
                 }
                 MotionEvent.ACTION_UP -> {
                     val moved = abs(ev.rawX - touchX) + abs(ev.rawY - touchY)
-                    if (!dragAllowedForGesture ||
-                        moved < BubbleSize.dimensions(currentBubbleSizePercent()).tapThresholdDp * dp) {
-                        if (positionCalibrationMode == null) v.performClick()
-                    } else {
-                        rememberPosition(gestureStartedMode, params.x, params.y, params.width)
-                    }
+                    val closing = positionCalibrationMode == null &&
+                        moved > 12f * dp && isDismissZone(ev.rawX, ev.rawY)
+                    removeDismissTarget()
                     isDraggingOverlay = false
+                    if (closing) {
+                        dismissMicrophone()
+                    } else {
+                        if (moved < BubbleSize.dimensions(currentBubbleSizePercent()).tapThresholdDp * dp) {
+                            if (positionCalibrationMode == null) v.performClick()
+                        } else if (dragAllowedForGesture) {
+                            rememberPosition(gestureStartedMode, params.x, params.y, params.width)
+                        }
+                        updateOverlayVisibility()
+                    }
                     dragAllowedForGesture = false
-                    updateOverlayVisibility()
                     true
                 }
                 MotionEvent.ACTION_CANCEL -> {
+                    removeDismissTarget()
                     isDraggingOverlay = false
                     dragAllowedForGesture = false
                     updateOverlayVisibility()
@@ -1142,6 +1233,17 @@ class WhisperAccessibilityService : AccessibilityService() {
             return
         }
 
+        // Close-target dismissal always copies the raw recognized transcript,
+        // never executes commands, edits an app, or injects text.
+        if (clipboardOnlySession) {
+            handler.post {
+                copyToClipboard(text)
+                toast("Dictation copied to clipboard")
+                goIdle()
+            }
+            return
+        }
+
         val voiceCommandsEnabled = prefs().getBoolean("voice_commands_enabled", false)
         if (voiceCommandsEnabled) {
             val trigger = prefs().getString("command_trigger_phrase", getString(R.string.default_trigger_phrase))
@@ -1318,6 +1420,7 @@ class WhisperAccessibilityService : AccessibilityService() {
 
     private fun goIdle() {
         state = State.IDLE
+        clipboardOnlySession = false
         setBusy(false)
         setRecordingLook(false) // [ui]
         setIcon(R.drawable.ic_app_logo)
