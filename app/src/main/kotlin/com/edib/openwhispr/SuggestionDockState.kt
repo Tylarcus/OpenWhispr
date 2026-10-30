@@ -24,16 +24,31 @@ class SuggestionDockState {
     private var stripVisible = false
     private var editedInCurrentField = false
 
-    fun onEdit() { editedInCurrentField = true }
+    fun onEdit() {
+        // A new genuine edit overrides a previously observed idle toolbar.
+        // Only subsequent Gboard structure events can clear it again.
+        editedInCurrentField = true
+        hasRecognizableStrip = false
+        stripVisible = false
+    }
 
     fun onRecognizedStructure(suggestionStripVisible: Boolean) {
         hasRecognizableStrip = true
         stripVisible = suggestionStripVisible
     }
 
+    fun onPlainToolbarVisible() {
+        // Explicit signal that Gboard switched from word candidates back to
+        // clipboard/GIF/voice controls while the keyboard is still OPEN.
+        hasRecognizableStrip = true
+        stripVisible = false
+        editedInCurrentField = false
+    }
+
     fun onEditorChanged() {
         editedInCurrentField = false
-        if (!hasRecognizableStrip) stripVisible = false
+        hasRecognizableStrip = false
+        stripVisible = false
     }
 
     fun onKeyboardClosed() {
