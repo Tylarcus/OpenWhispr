@@ -100,6 +100,8 @@ class WhisperAccessibilityService : AccessibilityService() {
     private val suggestionState = SuggestionDockState()
     private var lastFocusedEditorId: Int? = null
     private var lastSuggestionScanUptimeMs = 0L
+    private var ignoreOwnEditsUntilMs = 0L
+    private var suppressSuggestionsUntilRealEdit = false
     private var clipboardOnlySession = false
     private var dismissTargetView: TextView? = null
     private var dismissTargetParams: WindowManager.LayoutParams? = null
@@ -349,6 +351,7 @@ class WhisperAccessibilityService : AccessibilityService() {
         if (visible != previousKeyboardVisible) {
             if (!visible) {
                 suggestionState.onKeyboardClosed()
+                suppressSuggestionsUntilRealEdit = false
                 lastFocusedEditorId = null
             }
             dismissal.onKeyboardChanged(visible)
@@ -390,18 +393,23 @@ class WhisperAccessibilityService : AccessibilityService() {
 
     private fun onTextFieldChanged(event: AccessibilityEvent) {
         if (!refreshKeyboardSnapshot()) return
+        // ACTION_PASTE from OpenWhispr also emits a text-change event.
+        // Ignore our own edit and its delayed events.
+        if (android.os.SystemClock.uptimeMillis() < ignoreOwnEditsUntilMs) return
         if (event.packageName?.toString() == packageName) return
         // No text content read. Just the Android event type/editor class.
         val editor = event.source
         val editorClass = event.className?.toString().orEmpty()
         if (editor?.isEditable != true &&
             !editorClass.contains("EditText", ignoreCase = true)) return
+        suppressSuggestionsUntilRealEdit = false
         suggestionState.onEdit()
         updateOverlayVisibility()
     }
 
     private fun checkSuggestionStripOnWindowEvent() {
         if (!refreshKeyboardSnapshot()) return
+        if (suppressSuggestionsUntilRealEdit) return
         val now = android.os.SystemClock.uptimeMillis()
         // UI window trees can change dozens of times per second. Throttle
         // ONLY this optional suggestion scan, not V4's keyboard detection.
@@ -455,9 +463,25 @@ class WhisperAccessibilityService : AccessibilityService() {
         keyboardVisibleNow(), state == State.RECORDING,
         prefs().getBoolean("recording_dock_enabled", false),
         positionCalibrationMode,
-        suggestionsBusy = suggestionState.shouldUseAlternativePosition,
-        suggestionsDockEnabled = prefs().getBoolean("suggestions_dock_enabled", false)
+        suggestionsBusy = suggestionState.shouldUseAlternativePosition &&
+            !suppressSuggestionsUntilRealEdit,
+        suggestionsDockEnabled = prefs().getBoolean("suggestions_dock_enabled", false),
+        typingAction = typingAction()
     )
+
+    private fun typingAction(): TypingAction = TypingAction.fromPreference(
+        prefs().getString("typing_action", "position3")
+    )
+
+    private fun hiddenDueToTyping(): Boolean =
+        positionCalibrationMode == null && state == State.IDLE &&
+            MicrophoneModeResolver.shouldHideForTyping(
+                keyboardVisibleNow(), recording = false,
+                suggestionsBusy = suggestionState.shouldUseAlternativePosition &&
+                    !suppressSuggestionsUntilRealEdit,
+                suggestionsDockEnabled = prefs().getBoolean("suggestions_dock_enabled", false),
+                typingAction = typingAction()
+            )
 
     fun startPositionCalibration(mode: MicrophoneMode) {
         handler.post {
@@ -478,7 +502,7 @@ class WhisperAccessibilityService : AccessibilityService() {
     }
 
     private fun wantsOverlay(): Boolean =
-        masterEnabled() && !dismissal.dismissed &&
+        masterEnabled() && !dismissal.dismissed && !hiddenDueToTyping() &&
             (positionCalibrationMode != null || keyboardVisibleNow() || state != State.IDLE)
 
     // Preserve the V4 full-display coordinates and preference names.
@@ -486,6 +510,7 @@ class WhisperAccessibilityService : AccessibilityService() {
         MicrophoneMode.KEYBOARD -> "v3_dock_" + axis + "_fraction"
         MicrophoneMode.FLOATING -> "v3_float_" + axis + "_fraction"
         MicrophoneMode.RECORDING_DOCK -> "v5_recording_dock_" + axis + "_fraction"
+        MicrophoneMode.TYPING_DOCK -> "v7_typing_dock_" + axis + "_fraction"
     }
 
     private fun positionForMode(mode: MicrophoneMode, size: Int): BubbleSize.Position {
@@ -494,6 +519,7 @@ class WhisperAccessibilityService : AccessibilityService() {
                 (screenW - size).coerceAtLeast(1)).coerceIn(0f, 1f)
             MicrophoneMode.FLOATING -> 0.85f
             MicrophoneMode.RECORDING_DOCK -> 0.05f
+            MicrophoneMode.TYPING_DOCK -> 0.04f
         }
         val defaultY = when (mode) {
             MicrophoneMode.KEYBOARD -> {
@@ -502,12 +528,13 @@ class WhisperAccessibilityService : AccessibilityService() {
             }
             MicrophoneMode.FLOATING -> 0.5f
             MicrophoneMode.RECORDING_DOCK -> 0.46f
+            MicrophoneMode.TYPING_DOCK -> 0.35f
         }
         val x = prefs().getFloat(posKey(mode, "x"), defaultX)
         val y = prefs().getFloat(posKey(mode, "y"), defaultY)
         return OverlayPlacement.restore(
             OverlayPlacement.Fractions(x, y),
-            screenW, screenH, size, (MARGIN_DP * dp).toInt()
+            screenW, screenH, size, 0
         )
     }
 
@@ -904,7 +931,7 @@ class WhisperAccessibilityService : AccessibilityService() {
                     val position = BubbleSize.clampPosition(
                         startX + (ev.rawX - touchX).toInt(),
                         startY + (ev.rawY - touchY).toInt(),
-                        screenW, screenH, params.width, margin
+                        screenW, screenH, params.width, 0
                     )
                     params.x = position.x
                     params.y = position.y
@@ -1407,6 +1434,7 @@ class WhisperAccessibilityService : AccessibilityService() {
      * instead of inserting at the cursor/selection -- used by voice
      * commands, which transform the whole field rather than append to it. */
     private fun replaceFieldText(text: String) {
+        markOwnTextInsertion()
         if (clipboardOnlySession) {
             copyToClipboard(text)
             return
@@ -1464,6 +1492,14 @@ class WhisperAccessibilityService : AccessibilityService() {
         updateOverlayVisibility()
     }
 
+    private fun markOwnTextInsertion() {
+        // Metadata only: ignore text-change events caused by our own paste.
+        ignoreOwnEditsUntilMs = android.os.SystemClock.uptimeMillis() + 1600L
+        suppressSuggestionsUntilRealEdit = true
+        suggestionState.onKeyboardClosed()
+        handler.post { updateOverlayVisibility() }
+    }
+
     // --- Text injection ---
 
     /** Inserts [text] into the focused field. Returns true if it landed.
@@ -1477,6 +1513,7 @@ class WhisperAccessibilityService : AccessibilityService() {
         feedback: String? = getString(R.string.copied_to_clipboard),
         feedbackDurationMs: Long = 2000
     ): Boolean {
+        markOwnTextInsertion()
         copyToClipboard(text)
         // Final safety gate: even asynchronous cleanup/command callbacks must
         // never paste after a user drags the mic into Close.
