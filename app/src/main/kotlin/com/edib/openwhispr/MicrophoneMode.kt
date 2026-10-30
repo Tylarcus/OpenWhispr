@@ -9,11 +9,14 @@ object MicrophoneModeResolver {
         keyboardVisible: Boolean,
         recording: Boolean,
         recordingDockEnabled: Boolean,
-        calibration: MicrophoneMode? = null
+        calibration: MicrophoneMode? = null,
+        suggestionsBusy: Boolean = false,
+        suggestionsDockEnabled: Boolean = false
     ): MicrophoneMode {
         if (calibration != null) return calibration
         if (!keyboardVisible) return MicrophoneMode.FLOATING
-        return if (recording && recordingDockEnabled)
+        return if ((recording && recordingDockEnabled) ||
+            (suggestionsBusy && suggestionsDockEnabled))
             MicrophoneMode.RECORDING_DOCK
         else
             MicrophoneMode.KEYBOARD
