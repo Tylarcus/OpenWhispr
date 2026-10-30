@@ -107,18 +107,6 @@ class WhisperAccessibilityService : AccessibilityService() {
     private var dragAllowedForGesture = false
     private var gestureStartedMode = MicrophoneMode.KEYBOARD
     private var positionCalibrationMode: MicrophoneMode? = null
-    private var typingRecently = false
-    private val typingHoldMs = 2200L
-    private val typingExpiry = object : Runnable {
-        override fun run() {
-            if (isDraggingOverlay) {
-                handler.postDelayed(this, 350)
-                return
-            }
-            typingRecently = false
-            updateOverlayVisibility()
-        }
-    }
     private var button: ImageView? = null
     // [ui] Smoothed recording level for the voice-reactive overlay (main thread).
     private var audioLevel = 0f
@@ -181,8 +169,6 @@ class WhisperAccessibilityService : AccessibilityService() {
                 AccessibilityEvent.TYPE_VIEW_FOCUSED,
                 AccessibilityEvent.TYPE_VIEW_CLICKED ->
                     refreshAccessibilityFocusSignal()
-                AccessibilityEvent.TYPE_VIEW_TEXT_CHANGED ->
-                    handleTypingSignal(event)
             }
         } catch (e: Exception) {
             Log.e(TAG, "onAccessibilityEvent handling failed", e)
@@ -197,7 +183,6 @@ class WhisperAccessibilityService : AccessibilityService() {
         stopTone?.release()
         stopTone = null
         handler.removeCallbacks(focusPoller)
-        handler.removeCallbacks(typingExpiry)
         try {
             stopForeground(STOP_FOREGROUND_REMOVE)
         } catch (e: Exception) {
@@ -360,42 +345,20 @@ class WhisperAccessibilityService : AccessibilityService() {
         if (imeVisibleSignal == visible && imeBottomInsetPx == (if (visible) bottomInset else 0)) return
         imeVisibleSignal = visible
         imeBottomInsetPx = if (visible) bottomInset else 0
-        if (!visible) resetTypingSignal()
         updateOverlayVisibility()
     }
 
-    // This detector only checks that an editable field changed. It never
-    // reads, saves, logs, or transmits any characters the user typed.
-    private fun handleTypingSignal(event: AccessibilityEvent?) {
-        if (!prefs().getBoolean("typing_position_enabled", false)) return
-        if (positionCalibrationMode != null || state == State.TRANSCRIBING) return
-        if (event?.packageName?.toString() == packageName) return
-        if (!refreshKeyboardSnapshot()) return
-        val source = event?.source
-        val realEditor = source?.isEditable == true && source.isFocused
-        val editClass = event?.className?.toString().orEmpty()
-        if (!realEditor && !editClass.contains("EditText", ignoreCase = true)) return
-        typingRecently = true
-        handler.removeCallbacks(typingExpiry)
-        handler.postDelayed(typingExpiry, typingHoldMs)
-        updateOverlayVisibility()
-    }
-
-    private fun resetTypingSignal() {
-        typingRecently = false
-        handler.removeCallbacks(typingExpiry)
-    }
-
+    // Position 3 is active ONLY while RECORDING with Gboard visible.
+    // Finishing recording immediately restores position 1 (no timer).
     private fun currentMode(): MicrophoneMode = MicrophoneModeResolver.resolve(
-        keyboardVisibleNow(), typingRecently,
-        prefs().getBoolean("typing_position_enabled", false),
+        keyboardVisibleNow(), state == State.RECORDING,
+        prefs().getBoolean("recording_dock_enabled", false),
         positionCalibrationMode
     )
 
     fun startPositionCalibration(mode: MicrophoneMode) {
         handler.post {
             positionCalibrationMode = mode
-            resetTypingSignal()
             updateOverlayVisibility()
         }
     }
@@ -403,7 +366,6 @@ class WhisperAccessibilityService : AccessibilityService() {
     fun finishPositionCalibration() {
         handler.post {
             positionCalibrationMode = null
-            resetTypingSignal()
             updateOverlayVisibility()
         }
     }
@@ -419,7 +381,7 @@ class WhisperAccessibilityService : AccessibilityService() {
     private fun posKey(mode: MicrophoneMode, axis: String): String = when (mode) {
         MicrophoneMode.KEYBOARD -> "v3_dock_" + axis + "_fraction"
         MicrophoneMode.FLOATING -> "v3_float_" + axis + "_fraction"
-        MicrophoneMode.TYPING -> "v5_typing_" + axis + "_fraction"
+        MicrophoneMode.RECORDING_DOCK -> "v5_recording_dock_" + axis + "_fraction"
     }
 
     private fun positionForMode(mode: MicrophoneMode, size: Int): BubbleSize.Position {
@@ -427,7 +389,7 @@ class WhisperAccessibilityService : AccessibilityService() {
             MicrophoneMode.KEYBOARD -> ((screenW - (DOCK_RIGHT_DP * dp).toInt() - size).toFloat() /
                 (screenW - size).coerceAtLeast(1)).coerceIn(0f, 1f)
             MicrophoneMode.FLOATING -> 0.85f
-            MicrophoneMode.TYPING -> 0.05f
+            MicrophoneMode.RECORDING_DOCK -> 0.05f
         }
         val defaultY = when (mode) {
             MicrophoneMode.KEYBOARD -> {
@@ -435,7 +397,7 @@ class WhisperAccessibilityService : AccessibilityService() {
                 (target.toFloat() / (screenH - size).coerceAtLeast(1)).coerceIn(0f, 1f)
             }
             MicrophoneMode.FLOATING -> 0.5f
-            MicrophoneMode.TYPING -> 0.46f
+            MicrophoneMode.RECORDING_DOCK -> 0.46f
         }
         val x = prefs().getFloat(posKey(mode, "x"), defaultX)
         val y = prefs().getFloat(posKey(mode, "y"), defaultY)
