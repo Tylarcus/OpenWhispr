@@ -486,8 +486,8 @@ class MainActivity : AppCompatActivity() {
                 "Drag a floating preview without needing to start a recording."
             ) { promptPlacementCalibration(MicrophoneMode.FLOATING, markLocked) })
             addView(settingsRow(
-                "Set position 3 — recording with keyboard open",
-                "Choose the spot used only while dictating with Gboard open."
+                "Set position 3 — keyboard busy",
+                "Choose the position used while dictating or when Gboard suggests words."
             ) { promptPlacementCalibration(MicrophoneMode.RECORDING_DOCK, markLocked) })
         })
         val recordingDockSwitch = MaterialSwitch(this).apply {
@@ -496,10 +496,10 @@ class MainActivity : AppCompatActivity() {
         }
         settingsContainer.addView(group().apply {
             addView(settingsRow(
-                "Use separate position while dictating",
+                "Use position 3 while dictating",
                 "Optional: keyboard open + recording → position 3. " +
                     "Keyboard closed + recording → position 2. " +
-                    "Stop recording with Gboard open → position 1 immediately.",
+                    "Stop recording → position 1 unless suggestions are active.",
                 recordingDockSwitch
             ) {
                 val enabled = !recordingDockSwitch.isChecked
@@ -507,6 +507,34 @@ class MainActivity : AppCompatActivity() {
                 prefs().edit().putBoolean("recording_dock_enabled", enabled).apply()
                 WhisperAccessibilityService.instance?.refreshPositionPreferences()
             })
+        })
+
+        val suggestionsSwitch = MaterialSwitch(this).apply {
+            isChecked = prefs().getBoolean("suggestions_dock_enabled", false)
+            isClickable = false
+        }
+        settingsContainer.addView(group().apply {
+            addView(settingsRow(
+                "Move away from Gboard suggestions (experimental)",
+                "Optional: use position 3 when Gboard displays word suggestions. " +
+                    "Detection varies by keyboard version. When suggestions aren't exposed, " +
+                    "the button stays in position 3 after a text edit until the keyboard closes.",
+                suggestionsSwitch
+            ) {
+                val enabled = !suggestionsSwitch.isChecked
+                suggestionsSwitch.isChecked = enabled
+                prefs().edit().putBoolean("suggestions_dock_enabled", enabled).apply()
+                WhisperAccessibilityService.instance?.refreshPositionPreferences()
+            })
+        })
+        settingsContainer.addView(TextView(this).apply {
+            text = "Drag the microphone into the red Close target at the bottom to dismiss it. " +
+                "While recording, this finishes transcription and copies it to your clipboard " +
+                "without inserting text. It reappears next time you open the keyboard. " +
+                "The Close target also works while positions are locked."
+            textSize = 13f
+            setPadding(dp(24), dp(8), dp(24), dp(18))
+            setTextColor(attrColor(android.R.attr.textColorSecondary))
         })
 
         settingsContainer.addView(sectionHeader("Background notification"))
@@ -1616,7 +1644,7 @@ class MainActivity : AppCompatActivity() {
         val title = when (mode) {
             MicrophoneMode.KEYBOARD -> "Keyboard-open location"
             MicrophoneMode.FLOATING -> "Keyboard-closed location"
-            MicrophoneMode.RECORDING_DOCK -> "Recording with keyboard open"
+            MicrophoneMode.RECORDING_DOCK -> "Keyboard busy / recording"
         }
         val panel = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -1628,9 +1656,9 @@ class MainActivity : AppCompatActivity() {
                     "Drag the floating microphone to its preferred position. " +
                     "It will still hide when you're not dictating and the keyboard is closed."
                 MicrophoneMode.RECORDING_DOCK ->
-                    "This is the optional dictating position with Gboard open. " +
-                    "Tap the test field, drag the mic over Gboard's microphone or anywhere you like, " +
-                    "then Save & lock. It stays here until you stop recording or close Gboard."
+                    "This position is used while dictating with Gboard open OR when " +
+                    "suggestions are detected (if enabled). Tap the test field, drag the mic " +
+                    "away from suggestions or over Google's microphone, then Save & lock."
                 MicrophoneMode.KEYBOARD ->
                     "Tap the test field to open Gboard. Move the microphone to your preferred " +
                     "keyboard-open position—even above the keyboard—then tap Save & lock."
