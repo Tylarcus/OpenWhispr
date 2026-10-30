@@ -46,11 +46,11 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "gboard-dock-v1-test" \
-            "app/build/outputs/apk/debug/app-debug.apk#OpenWhispr-Gboard-Dock-Test-v1.apk" \
+          gh release create "gboard-dock-v2-test" \
+            "app/build/outputs/apk/debug/app-debug.apk#OpenWhispr-Gboard-Dock-Test-v2.apk" \
             --repo "${{ github.repository }}" \
             --target "${{ github.sha }}" \
-            --title "Gboard Dock Test V1 (experimental debug APK)" \
+            --title "Gboard Dock Test V2 (experimental debug APK)" \
             --notes "Experimental keyboard-docking build. Not tested on physical hardware. Uses applicationId com.edib.openwhispr.docktest, so it does not overwrite the official OpenWhispr app. Disable the original accessibility service while trying the test build." \
             --prerelease \
             --latest=false
