@@ -118,6 +118,12 @@ class WhisperAccessibilityService : AccessibilityService() {
     private var dragAllowedForGesture = false
     private var gestureStartedMode = MicrophoneMode.KEYBOARD
     private var positionCalibrationMode: MicrophoneMode? = null
+    private var calibrationLayout: KeyboardLayoutProfile? = null
+    private var activeKeyboardLayout = KeyboardLayoutProfile.TEXT
+    private var gestureStartedLayout = KeyboardLayoutProfile.TEXT
+    private var transientPosition: BubbleSize.Position? = null
+    private var transientPlacementKey: String? = null
+    private var lastPlacementKey: String? = null
     private var button: ImageView? = null
     // [ui] Smoothed recording level for the voice-reactive overlay (main thread).
     private var audioLevel = 0f
@@ -175,6 +181,7 @@ class WhisperAccessibilityService : AccessibilityService() {
                 AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED,
                 AccessibilityEvent.TYPE_VIEW_FOCUSED,
                 AccessibilityEvent.TYPE_VIEW_CLICKED -> {
+                    updateEditorLayoutFromEvent(event)
                     refreshAccessibilityFocusSignal()
                     if (prefs().getBoolean("suggestions_dock_enabled", false)) {
                         if (event.eventType == AccessibilityEvent.TYPE_VIEW_FOCUSED)
@@ -187,6 +194,7 @@ class WhisperAccessibilityService : AccessibilityService() {
                         checkSuggestionStripOnWindowEvent()
                 }
                 AccessibilityEvent.TYPE_VIEW_TEXT_CHANGED -> {
+                    updateEditorLayoutFromEvent(event)
                     if (prefs().getBoolean("suggestions_dock_enabled", false))
                         onTextFieldChanged(event)
                 }
@@ -378,6 +386,59 @@ class WhisperAccessibilityService : AccessibilityService() {
         updateOverlayVisibility()
     }
 
+    /**
+     * Classify the type of focused input (text/number/PIN) without reading
+     * its contents. Gboard is the same IME app across all these layouts.
+     */
+    private fun updateEditorLayoutFromEvent(event: AccessibilityEvent) {
+        val source = event.source ?: return
+        if (!source.isEditable && !source.isPassword) return
+        val detected = KeyboardLayoutClassifier.classify(
+            source.inputType, source.isPassword
+        )
+        if (detected != activeKeyboardLayout) {
+            activeKeyboardLayout = detected
+            // A field-layout change is also a home-position transition.
+            transientPosition = null
+            transientPlacementKey = null
+            lastPlacementKey = null
+            updateOverlayVisibility()
+        }
+    }
+
+    private fun activePositionProfile(): KeyboardLayoutProfile =
+        calibrationLayout ?: activeKeyboardLayout
+
+    private fun numericKeyboardBehavior(): NumericKeyboardBehavior =
+        NumericKeyboardBehavior.fromPreference(
+            prefs().getString("numeric_keyboard_behavior", "hide")
+        )
+
+    private fun separateNumericPositions(): Boolean =
+        calibrationLayout == KeyboardLayoutProfile.NUMBER ||
+            numericKeyboardBehavior() == NumericKeyboardBehavior.SEPARATE
+
+    private fun layoutShouldHideIdleOverlay(): Boolean =
+        positionCalibrationMode == null && state == State.IDLE &&
+            keyboardVisibleNow() &&
+            (activeKeyboardLayout == KeyboardLayoutProfile.SECURE ||
+                (activeKeyboardLayout == KeyboardLayoutProfile.NUMBER &&
+                    numericKeyboardBehavior() == NumericKeyboardBehavior.HIDE))
+
+    private fun currentPlacementKey(): String =
+        activePositionProfile().name + ":" + currentMode().name + ":" + keyboardVisibleNow()
+
+    private fun clearTransientPositionOnModeChange(placementKey: String) {
+        if (placementKey != lastPlacementKey) {
+            transientPosition = null
+            transientPlacementKey = null
+            lastPlacementKey = placementKey
+        }
+    }
+
+    private fun preferredDragBehavior(): String =
+        prefs().getString("drag_behavior", "temporary") ?: "temporary"
+
     private fun onEditorFocusChanged(event: AccessibilityEvent) {
         val node = event.source ?: return
         if (!node.isEditable) return
@@ -483,9 +544,13 @@ class WhisperAccessibilityService : AccessibilityService() {
                 typingAction = typingAction()
             )
 
-    fun startPositionCalibration(mode: MicrophoneMode) {
+    fun startPositionCalibration(
+        mode: MicrophoneMode,
+        layout: KeyboardLayoutProfile = KeyboardLayoutProfile.TEXT
+    ) {
         handler.post {
             positionCalibrationMode = mode
+            calibrationLayout = layout
             updateOverlayVisibility()
         }
     }
@@ -493,6 +558,7 @@ class WhisperAccessibilityService : AccessibilityService() {
     fun finishPositionCalibration() {
         handler.post {
             positionCalibrationMode = null
+            calibrationLayout = null
             updateOverlayVisibility()
         }
     }
@@ -503,14 +569,23 @@ class WhisperAccessibilityService : AccessibilityService() {
 
     private fun wantsOverlay(): Boolean =
         masterEnabled() && !dismissal.dismissed && !hiddenDueToTyping() &&
+            !layoutShouldHideIdleOverlay() &&
             (positionCalibrationMode != null || keyboardVisibleNow() || state != State.IDLE)
 
-    // Preserve the V4 full-display coordinates and preference names.
-    private fun posKey(mode: MicrophoneMode, axis: String): String = when (mode) {
-        MicrophoneMode.KEYBOARD -> "v3_dock_" + axis + "_fraction"
-        MicrophoneMode.FLOATING -> "v3_float_" + axis + "_fraction"
-        MicrophoneMode.RECORDING_DOCK -> "v5_recording_dock_" + axis + "_fraction"
-        MicrophoneMode.TYPING_DOCK -> "v7_typing_dock_" + axis + "_fraction"
+    // Existing V4/V5/V7 normal-text positions remain unchanged.
+    private fun posKey(
+        mode: MicrophoneMode, axis: String,
+        profile: KeyboardLayoutProfile = activePositionProfile()
+    ): String {
+        val base = when (mode) {
+            MicrophoneMode.KEYBOARD -> "v3_dock_" + axis + "_fraction"
+            MicrophoneMode.FLOATING -> "v3_float_" + axis + "_fraction"
+            MicrophoneMode.RECORDING_DOCK -> "v5_recording_dock_" + axis + "_fraction"
+            MicrophoneMode.TYPING_DOCK -> "v7_typing_dock_" + axis + "_fraction"
+        }
+        return if (profile == KeyboardLayoutProfile.NUMBER && separateNumericPositions())
+            "v8_numeric_" + base
+        else base
     }
 
     private fun positionForMode(mode: MicrophoneMode, size: Int): BubbleSize.Position {
@@ -530,18 +605,28 @@ class WhisperAccessibilityService : AccessibilityService() {
             MicrophoneMode.RECORDING_DOCK -> 0.46f
             MicrophoneMode.TYPING_DOCK -> 0.35f
         }
-        val x = prefs().getFloat(posKey(mode, "x"), defaultX)
-        val y = prefs().getFloat(posKey(mode, "y"), defaultY)
+        val currentX = posKey(mode, "x")
+        val currentY = posKey(mode, "y")
+        val fallbackX = posKey(mode, "x", KeyboardLayoutProfile.TEXT)
+        val fallbackY = posKey(mode, "y", KeyboardLayoutProfile.TEXT)
+        // If no custom number layout spot has been chosen, use the normal
+        // text location rather than unexpectedly resetting to a corner.
+        val x = prefs().getFloat(currentX, prefs().getFloat(fallbackX, defaultX))
+        val y = prefs().getFloat(currentY, prefs().getFloat(fallbackY, defaultY))
         return OverlayPlacement.restore(
-            OverlayPlacement.Fractions(x, y),
-            screenW, screenH, size, 0
+            OverlayPlacement.Fractions(x, y), screenW, screenH, size, 0
         )
     }
 
-    private fun rememberPosition(mode: MicrophoneMode, x: Int, y: Int, size: Int) {
+    private fun rememberPosition(
+        mode: MicrophoneMode, x: Int, y: Int, size: Int,
+        profile: KeyboardLayoutProfile = activePositionProfile()
+    ) {
         val f = OverlayPlacement.remember(x, y, screenW, screenH, size)
-        prefs().edit().putFloat(posKey(mode, "x"), f.x)
-            .putFloat(posKey(mode, "y"), f.y).apply()
+        prefs().edit()
+            .putFloat(posKey(mode, "x", profile), f.x)
+            .putFloat(posKey(mode, "y", profile), f.y)
+            .apply()
     }
 
     private fun dockOverlayToKeyboard() {
@@ -549,7 +634,11 @@ class WhisperAccessibilityService : AccessibilityService() {
         val lp = layoutParams ?: return
         val view = overlayView ?: return
         val wm = getSystemService(WINDOW_SERVICE) as WindowManager
-        val pos = positionForMode(currentMode(), lp.width)
+        val key = currentPlacementKey()
+        clearTransientPositionOnModeChange(key)
+        val pos = if (transientPlacementKey == key) transientPosition
+            ?: positionForMode(currentMode(), lp.width)
+        else positionForMode(currentMode(), lp.width)
         if (lp.x == pos.x && lp.y == pos.y) return
         lp.x = pos.x
         lp.y = pos.y
@@ -914,6 +1003,7 @@ class WhisperAccessibilityService : AccessibilityService() {
                     isDraggingOverlay = true
                     gestureStartedWithKeyboard = keyboardVisibleNow()
                     gestureStartedMode = currentMode()
+                    gestureStartedLayout = activePositionProfile()
                     startX = params.x
                     startY = params.y
                     touchX = ev.rawX
@@ -953,8 +1043,21 @@ class WhisperAccessibilityService : AccessibilityService() {
                     } else {
                         if (moved < BubbleSize.dimensions(currentBubbleSizePercent()).tapThresholdDp * dp) {
                             if (positionCalibrationMode == null) v.performClick()
-                        } else if (dragAllowedForGesture) {
-                            rememberPosition(gestureStartedMode, params.x, params.y, params.width)
+                        } else {
+                            // Moving is always allowed, even when positions are
+                            // locked. Only calibration or explicit Save behavior
+                            // overwrites a remembered home location.
+                            if (positionCalibrationMode != null ||
+                                (dragAllowedForGesture && preferredDragBehavior() == "save")) {
+                                rememberPosition(
+                                    gestureStartedMode, params.x, params.y,
+                                    params.width, gestureStartedLayout
+                                )
+                            } else {
+                                val key = currentPlacementKey()
+                                transientPosition = BubbleSize.Position(params.x, params.y)
+                                transientPlacementKey = key
+                            }
                         }
                         updateOverlayVisibility()
                     }
