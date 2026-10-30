@@ -3,7 +3,7 @@ name: Gboard Dock Test APK
 on:
   push:
     branches:
-      - feature/gboard-dock-v5
+      - feature/gboard-dock-v6
   workflow_dispatch:
 
 permissions:
@@ -51,11 +51,11 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "gboard-dock-v5-test" \
-            "app/build/outputs/apk/debug/app-debug.apk#OpenWhispr-Gboard-Dock-Test-v5.apk" \
+          gh release create "gboard-dock-v6-test" \
+            "app/build/outputs/apk/debug/app-debug.apk#OpenWhispr-Gboard-Dock-Test-v6.apk" \
             --repo "${{ github.repository }}" \
             --target "${{ github.sha }}" \
-            --title "Gboard Dock Test V5 (experimental debug APK)" \
+            --title "Gboard Dock Test V6 (experimental debug APK)" \
             --notes "Experimental keyboard-docking build. Not tested on physical hardware. Uses applicationId com.edib.openwhispr.docktest, so it does not overwrite the official OpenWhispr app. Disable the original accessibility service while trying the test build." \
             --prerelease \
             --latest=false
