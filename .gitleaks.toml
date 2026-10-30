@@ -16,6 +16,14 @@ description = "Android signing password literal in source"
 regex = '''(storePassword|keyPassword)\s*=\s*"[^"\s]{4,}"'''
 keywords = ["storepassword", "keypassword"]
 
+# This test-only passphrase is public by design; the actual signing key
+# is protected in GitHub Actions and is not committed to the repository.
+[[rules.allowlists]]
+description = "Ignore ONLY the known local dock-test signing password literal"
+regexTarget = "match"
+regexes = ['''(storePassword|keyPassword)\s*=\s*"OpenWhisprDockTest2026!"''']
+
+
 [allowlist]
 description = "Placeholders and docs"
 regexes = ['''gsk_(…|\.\.\.)''', '''gsk_X+''', '''(storePassword|keyPassword)\s*=\s*"android"''', '''OpenWhisprDockTest2026!''']
