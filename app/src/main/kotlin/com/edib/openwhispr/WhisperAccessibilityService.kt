@@ -60,7 +60,7 @@ class WhisperAccessibilityService : AccessibilityService() {
 
         // How often we re-check the focused node as a failsafe, in case an
         // app never fires a focus-related accessibility event at all.
-        private const val FOCUS_POLL_MS = 500L
+        private const val FOCUS_POLL_MS = 100L
 
         // No visibility debounce: hiding the keyboard must hide the idle mic now.
 
@@ -101,6 +101,7 @@ class WhisperAccessibilityService : AccessibilityService() {
     // qualifies; an ongoing recording/transcription remains accessible.
     private var imeVisibleSignal = false
     private var imeBottomInsetPx = 0
+    private var isDraggingOverlay = false
     private var button: ImageView? = null
     // [ui] Smoothed recording level for the voice-reactive overlay (main thread).
     private var audioLevel = 0f
@@ -144,7 +145,7 @@ class WhisperAccessibilityService : AccessibilityService() {
             Log.w(TAG, "Recording stop tone unavailable", e)
         }
         showOverlay()
-        startForegroundNotification()
+        refreshPersistentNotification()
         updateOverlayVisibility()
         handler.post(focusPoller)
         // Try to load local model in background
@@ -178,6 +179,14 @@ class WhisperAccessibilityService : AccessibilityService() {
         }
         removeOverlay()
         super.onDestroy()
+    }
+
+    fun refreshPersistentNotification() {
+        if (prefs().getBoolean("persistent_notification_enabled", false)) {
+            startForegroundNotification()
+        } else {
+            try { stopForeground(STOP_FOREGROUND_REMOVE) } catch (_: Exception) {}
+        }
     }
 
     private fun startForegroundNotification() {
@@ -326,32 +335,57 @@ class WhisperAccessibilityService : AccessibilityService() {
     private fun wantsOverlay(): Boolean =
         masterEnabled() && (keyboardVisibleNow() || state != State.IDLE)
 
+    // Two saved positions: inside the keyboard, and floating when recording
+    // outside the keyboard. Coordinates use fractions for orientation changes.
+    private fun posKey(keyboard: Boolean, axis: String): String =
+        (if (keyboard) "dock_" else "float_") + axis + "_fraction"
+
+    private fun positionForMode(keyboard: Boolean, size: Int): BubbleSize.Position {
+        val top = if (keyboard) keyboardTopPx() else 0
+        val regionH = if (keyboard) (screenH - top).coerceAtLeast(1) else screenH
+        val defaultX = if (keyboard) {
+            ((screenW - (DOCK_RIGHT_DP * dp).toInt() - size).toFloat() /
+                (screenW - size).coerceAtLeast(1)).coerceIn(0f, 1f)
+        } else 0.85f
+        val defaultY = if (keyboard) {
+            (DOCK_TOP_DP * dp / (regionH - size).coerceAtLeast(1)).coerceIn(0f, 1f)
+        } else 0.5f
+        val x = prefs().getFloat(posKey(keyboard, "x"), defaultX).coerceIn(0f, 1f)
+        val y = prefs().getFloat(posKey(keyboard, "y"), defaultY).coerceIn(0f, 1f)
+        return BubbleSize.clampPosition(
+            (x * (screenW - size).coerceAtLeast(0)).toInt(),
+            top + (y * (regionH - size).coerceAtLeast(0)).toInt(),
+            screenW, screenH, size, (MARGIN_DP * dp).toInt()
+        )
+    }
+
+    private fun rememberPosition(keyboard: Boolean, x: Int, y: Int, size: Int) {
+        val top = if (keyboard) keyboardTopPx() else 0
+        val regionH = if (keyboard) (screenH - top).coerceAtLeast(1) else screenH
+        val fx = (x.toFloat() / (screenW - size).coerceAtLeast(1)).coerceIn(0f, 1f)
+        val fy = ((y - top).toFloat() / (regionH - size).coerceAtLeast(1))
+            .coerceIn(0f, 1f)
+        prefs().edit().putFloat(posKey(keyboard, "x"), fx)
+            .putFloat(posKey(keyboard, "y"), fy).apply()
+    }
+
     private fun dockOverlayToKeyboard() {
+        if (isDraggingOverlay) return
         val lp = layoutParams ?: return
         val view = overlayView ?: return
         val wm = getSystemService(WINDOW_SERVICE) as WindowManager
-        val margin = (MARGIN_DP * dp).toInt()
-        val keyboardVisible = keyboardVisibleNow()
-        val position = if (keyboardVisible) {
-            val desiredX = screenW - (DOCK_RIGHT_DP * dp).toInt() - lp.width
-            val desiredY = keyboardTopPx() + (DOCK_TOP_DP * dp).toInt()
-            BubbleSize.clampPosition(
-                desiredX, desiredY, screenW, screenH, lp.width, margin
-            )
-        } else {
-            savedHomePosition(lp.width)
-        }
-        if (lp.x == position.x && lp.y == position.y) return
-        lp.x = position.x
-        lp.y = position.y
+        val pos = positionForMode(keyboardVisibleNow(), lp.width)
+        if (lp.x == pos.x && lp.y == pos.y) return
+        lp.x = pos.x
+        lp.y = pos.y
         try {
             wm.updateViewLayout(view, lp)
-            feedbackLayoutParams?.let { feedbackParams ->
-                positionFeedback(feedbackParams, lp)
-                feedbackView?.let { wm.updateViewLayout(it, feedbackParams) }
+            feedbackLayoutParams?.let { feedback ->
+                positionFeedback(feedback, lp)
+                feedbackView?.let { wm.updateViewLayout(it, feedback) }
             }
         } catch (e: Exception) {
-            Log.w(TAG, "Unable to dock microphone", e)
+            Log.w(TAG, "Dock reposition failed", e)
         }
     }
 
@@ -423,7 +457,9 @@ class WhisperAccessibilityService : AccessibilityService() {
                 val lp = layoutParams ?: return@post
                 val wm = getSystemService(WINDOW_SERVICE) as WindowManager
                 val dimensions = BubbleSize.dimensions(currentBubbleSizePercent())
-                val ringSize = (dimensions.ringDp * dp).toInt()
+                val ringSize = minOf((dimensions.ringDp * dp).toInt(), screenW / 2)
+                val buttonSize = (ringSize * BubbleSize.BUTTON_DP / BubbleSize.RING_DP.toFloat()).toInt()
+                val padPx = (ringSize * BubbleSize.PADDING_DP / BubbleSize.RING_DP.toFloat()).toInt()
                 val margin = (MARGIN_DP * dp).toInt()
                 val position = BubbleSize.clampPosition(
                     lp.x, lp.y, screenW, screenH, ringSize, margin
@@ -439,18 +475,15 @@ class WhisperAccessibilityService : AccessibilityService() {
                     spinner?.layoutParams = ringParams
                 }
                 (button?.layoutParams as? FrameLayout.LayoutParams)?.let { buttonParams ->
-                    val buttonSize = (dimensions.buttonDp * dp).toInt()
                     buttonParams.width = buttonSize
                     buttonParams.height = buttonSize
                     button?.layoutParams = buttonParams
                 }
                 button?.setPadding(
-                    (dimensions.paddingDp * dp).toInt(),
-                    (dimensions.paddingDp * dp).toInt(),
-                    (dimensions.paddingDp * dp).toInt(),
-                    (dimensions.paddingDp * dp).toInt()
+                    padPx, padPx, padPx, padPx
                 )
                 wm.updateViewLayout(view, lp)
+                dockOverlayToKeyboard()
 
                 feedbackLayoutParams?.let { feedbackParams ->
                     positionFeedback(feedbackParams, lp)
@@ -476,7 +509,7 @@ class WhisperAccessibilityService : AccessibilityService() {
                 val view = overlayView ?: return@post
                 val lp = layoutParams ?: return@post
                 val wm = getSystemService(WINDOW_SERVICE) as WindowManager
-                val position = savedHomePosition(lp.width)
+                val position = positionForMode(keyboardVisibleNow(), lp.width)
                 lp.x = position.x
                 lp.y = position.y
                 wm.updateViewLayout(view, lp)
@@ -561,9 +594,9 @@ class WhisperAccessibilityService : AccessibilityService() {
     private fun showOverlay() {
         val wm = getSystemService(WINDOW_SERVICE) as WindowManager
         val dimensions = BubbleSize.dimensions(currentBubbleSizePercent())
-        val buttonSize = (dimensions.buttonDp * dp).toInt()
-        val ringSize = (dimensions.ringDp * dp).toInt()
-        val pad = (dimensions.paddingDp * dp).toInt()
+        val ringSize = minOf((dimensions.ringDp * dp).toInt(), screenW / 2)
+        val buttonSize = (ringSize * BubbleSize.BUTTON_DP / BubbleSize.RING_DP.toFloat()).toInt()
+        val pad = (ringSize * BubbleSize.PADDING_DP / BubbleSize.RING_DP.toFloat()).toInt()
         val margin = (MARGIN_DP * dp).toInt()
 
         val ring = ProgressBar(this).apply {
@@ -606,7 +639,7 @@ class WhisperAccessibilityService : AccessibilityService() {
             PixelFormat.TRANSLUCENT
         ).apply {
             gravity = Gravity.TOP or Gravity.START
-            val home = savedHomePosition(ringSize)
+            val home = positionForMode(keyboardVisibleNow(), ringSize)
             x = home.x
             y = home.y
         }
@@ -617,6 +650,7 @@ class WhisperAccessibilityService : AccessibilityService() {
         overlay.setOnTouchListener { v, ev ->
             when (ev.action) {
                 MotionEvent.ACTION_DOWN -> {
+                    isDraggingOverlay = true
                     startX = params.x; startY = params.y
                     touchX = ev.rawX; touchY = ev.rawY
                     true
@@ -644,16 +678,15 @@ class WhisperAccessibilityService : AccessibilityService() {
                     if (moved < BubbleSize.dimensions(currentBubbleSizePercent()).tapThresholdDp * dp) {
                         v.performClick()
                     } else {
-                        params.x = BubbleSize.snappedX(params.x, params.width, screenW, margin)
-                        params.y = BubbleSize.clampPosition(
-                            params.x, params.y, screenW, screenH, params.width, margin
-                        ).y
-                        wm.updateViewLayout(v, params)
-                        feedbackLayoutParams?.let {
-                            positionFeedback(it, params)
-                            wm.updateViewLayout(feedbackView, it)
-                        }
+                        rememberPosition(keyboardVisibleNow(), params.x, params.y, params.width)
                     }
+                    isDraggingOverlay = false
+                    updateOverlayVisibility()
+                    true
+                }
+                MotionEvent.ACTION_CANCEL -> {
+                    isDraggingOverlay = false
+                    updateOverlayVisibility()
                     true
                 }
                 else -> false
