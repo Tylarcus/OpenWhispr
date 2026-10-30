@@ -1,18 +1,21 @@
 package com.edib.openwhispr
 
-/** Keeps layout decisions independent of Android's accessibility events. */
-enum class MicrophoneMode { KEYBOARD, FLOATING, TYPING }
+/** The three user-configurable positions of the dictation microphone. */
+enum class MicrophoneMode { KEYBOARD, FLOATING, RECORDING_DOCK }
 
+/** Pure layout decision: no text monitoring, timers, or keyboard heuristics. */
 object MicrophoneModeResolver {
     fun resolve(
         keyboardVisible: Boolean,
-        typingRecently: Boolean,
-        typingEnabled: Boolean,
+        recording: Boolean,
+        recordingDockEnabled: Boolean,
         calibration: MicrophoneMode? = null
     ): MicrophoneMode {
         if (calibration != null) return calibration
         if (!keyboardVisible) return MicrophoneMode.FLOATING
-        return if (typingEnabled && typingRecently) MicrophoneMode.TYPING
-        else MicrophoneMode.KEYBOARD
+        return if (recording && recordingDockEnabled)
+            MicrophoneMode.RECORDING_DOCK
+        else
+            MicrophoneMode.KEYBOARD
     }
 }
