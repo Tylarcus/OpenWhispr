@@ -486,24 +486,25 @@ class MainActivity : AppCompatActivity() {
                 "Drag a floating preview without needing to start a recording."
             ) { promptPlacementCalibration(MicrophoneMode.FLOATING, markLocked) })
             addView(settingsRow(
-                "Set typing position",
-                "Choose where the mic should move when you type or swipe."
-            ) { promptPlacementCalibration(MicrophoneMode.TYPING, markLocked) })
+                "Set position 3 — recording with keyboard open",
+                "Choose the spot used only while dictating with Gboard open."
+            ) { promptPlacementCalibration(MicrophoneMode.RECORDING_DOCK, markLocked) })
         })
-        val typingSwitch = MaterialSwitch(this).apply {
-            isChecked = prefs().getBoolean("typing_position_enabled", false)
+        val recordingDockSwitch = MaterialSwitch(this).apply {
+            isChecked = prefs().getBoolean("recording_dock_enabled", false)
             isClickable = false
         }
         settingsContainer.addView(group().apply {
             addView(settingsRow(
-                "Move microphone while typing",
-                "Optional: move to your third saved position after a text edit, then return " +
-                    "after about 2 seconds without typing. Gboard suggestions remain usable.",
-                typingSwitch
+                "Use separate position while dictating",
+                "Optional: keyboard open + recording → position 3. " +
+                    "Keyboard closed + recording → position 2. " +
+                    "Stop recording with Gboard open → position 1 immediately.",
+                recordingDockSwitch
             ) {
-                val enabled = !typingSwitch.isChecked
-                typingSwitch.isChecked = enabled
-                prefs().edit().putBoolean("typing_position_enabled", enabled).apply()
+                val enabled = !recordingDockSwitch.isChecked
+                recordingDockSwitch.isChecked = enabled
+                prefs().edit().putBoolean("recording_dock_enabled", enabled).apply()
                 WhisperAccessibilityService.instance?.refreshPositionPreferences()
             })
         })
@@ -1615,7 +1616,7 @@ class MainActivity : AppCompatActivity() {
         val title = when (mode) {
             MicrophoneMode.KEYBOARD -> "Keyboard-open location"
             MicrophoneMode.FLOATING -> "Keyboard-closed location"
-            MicrophoneMode.TYPING -> "While-typing location"
+            MicrophoneMode.RECORDING_DOCK -> "Recording with keyboard open"
         }
         val panel = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -1626,9 +1627,10 @@ class MainActivity : AppCompatActivity() {
                 MicrophoneMode.FLOATING ->
                     "Drag the floating microphone to its preferred position. " +
                     "It will still hide when you're not dictating and the keyboard is closed."
-                MicrophoneMode.TYPING ->
-                    "This preview shows the optional third location. Open the test field, " +
-                    "drag the microphone away from Gboard's suggestions, and tap Save & lock."
+                MicrophoneMode.RECORDING_DOCK ->
+                    "This is the optional dictating position with Gboard open. " +
+                    "Tap the test field, drag the mic over Gboard's microphone or anywhere you like, " +
+                    "then Save & lock. It stays here until you stop recording or close Gboard."
                 MicrophoneMode.KEYBOARD ->
                     "Tap the test field to open Gboard. Move the microphone to your preferred " +
                     "keyboard-open position—even above the keyboard—then tap Save & lock."
