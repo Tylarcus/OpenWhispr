@@ -10,6 +10,7 @@ import android.content.pm.ServiceInfo
 import android.content.res.ColorStateList
 import android.graphics.Color
 import android.graphics.PixelFormat
+import android.graphics.Rect
 import android.graphics.drawable.GradientDrawable
 import android.media.AudioFormat
 import android.media.AudioManager
@@ -52,15 +53,16 @@ class WhisperAccessibilityService : AccessibilityService() {
 
         private const val ALPHA_IDLE = 0.7f
         private const val ALPHA_ACTIVE = 1.0f
-        private const val ALPHA_FADE_MS = 150L
-        private const val FADE_OUT_MS = 140L
+        // Idle microphone sits in the IME's top toolbar, left of Gboard's mic.
+        // Tune these two offsets after testing on the target Galaxy.
+        private const val DOCK_RIGHT_DP = 113f
+        private const val DOCK_TOP_DP = 5f
 
         // How often we re-check the focused node as a failsafe, in case an
         // app never fires a focus-related accessibility event at all.
         private const val FOCUS_POLL_MS = 500L
 
-        // A focus/keyboard change must hold this long before the overlay shows or hides.
-        private const val OVERLAY_DEBOUNCE_MS = 300L
+        // No visibility debounce: hiding the keyboard must hide the idle mic now.
 
         // Placeholder circle shown by Settings while choosing the bubble position.
         private const val PREVIEW_FILL = 0x552F80ED
@@ -95,14 +97,10 @@ class WhisperAccessibilityService : AccessibilityService() {
     private var overlayView: FrameLayout? = null
     private var overlayShown = false
 
-    // Two independent signals feed overlay visibility (OR'd together): an
-    // accessibility-tree focus check (event-driven AND polled as a failsafe,
-    // since some apps -- notably WhatsApp/Telegram -- don't reliably fire
-    // focus events for their custom message composers) and the system
-    // keyboard's own visibility (window-manager-level, doesn't depend on the
-    // foreground app cooperating with accessibility at all).
-    private var accessibilityFocusSignal = false
+    // Focus alone must NOT display an idle microphone. Only a visible IME
+    // qualifies; an ongoing recording/transcription remains accessible.
     private var imeVisibleSignal = false
+    private var imeBottomInsetPx = 0
     private var button: ImageView? = null
     // [ui] Smoothed recording level for the voice-reactive overlay (main thread).
     private var audioLevel = 0f
@@ -172,7 +170,6 @@ class WhisperAccessibilityService : AccessibilityService() {
         removePositionPreview()
         stopTone?.release()
         stopTone = null
-        handler.removeCallbacks(overlayVisibilityDebounce)
         handler.removeCallbacks(focusPoller)
         try {
             stopForeground(STOP_FOREGROUND_REMOVE)
@@ -280,120 +277,124 @@ class WhisperAccessibilityService : AccessibilityService() {
     /** Reload local model (called from MainActivity when settings change) */
     fun reloadModel() { thread { initLocalModel() } }
 
-    // --- Overlay visibility (multi-signal, OR'd together) ---
-
+    // --- Keyboard-only idle docking ---
+    //
+    // Focused text fields aren't reliable indicators of IME visibility. A field
+    // can remain focused for seconds after the keyboard closes, which was the
+    // reason the old bubble lingered. Keyboard windows are the primary signal.
     private fun refreshAccessibilityFocusSignal() {
         try {
-            val root = rootInActiveWindow
-            val focused = root?.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
-            // The foreground app's own tree is only one witness: web-based
-            // composers (the Claude app's Code tab) often don't report an
-            // editable focus at all. The other two come from the system.
-            accessibilityFocusSignal = (focused != null && isEditableTextField(focused)) ||
-                hasActiveTextInput() || isKeyboardWindowShown()
-            focused?.recycle()
-            root?.recycle()
-        } catch (e: Exception) {
-            Log.e(TAG, "refreshAccessibilityFocusSignal failed", e)
-        } finally {
             updateOverlayVisibility()
-        }
-    }
-
-    private fun isEditableTextField(node: AccessibilityNodeInfo): Boolean {
-        val className = node.className?.toString().orEmpty()
-        return node.isEditable || className.contains("EditText")
-    }
-
-    /** Android 13+: a text field has an open input connection to this
-     * service (flagInputMethodEditor), the same one injectText types
-     * through. True whatever the app's accessibility tree says. */
-    private fun hasActiveTextInput(): Boolean {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return false
-        val method = inputMethod ?: return false
-        val inputType = method.currentInputEditorInfo?.inputType ?: return false
-        return method.currentInputStarted && inputType != InputType.TYPE_NULL
-    }
-
-    /** The keyboard's own window is on screen. Needs
-     * flagRetrieveInteractiveWindows; without it the list is empty. */
-    private fun isKeyboardWindowShown(): Boolean =
-        try {
-            windows?.any { it.type == AccessibilityWindowInfo.TYPE_INPUT_METHOD } == true
         } catch (e: Exception) {
-            false
+            Log.e(TAG, "refreshKeyboardDock failed", e)
+        }
+    }
+
+    private fun keyboardWindow(): AccessibilityWindowInfo? =
+        try {
+            windows?.firstOrNull { it.type == AccessibilityWindowInfo.TYPE_INPUT_METHOD }
+        } catch (e: Exception) {
+            Log.w(TAG, "Keyboard window lookup failed", e)
+            null
         }
 
-    /** Fed by the overlay view's WindowInsets listener -- catches apps whose
-     * custom composers (WhatsApp, Telegram, ...) never fire accessibility
-     * focus events at all, since this signal comes from the window manager
-     * rather than the foreground app's own accessibility tree. */
-    private fun onKeyboardVisibilityChanged(visible: Boolean) {
+    private fun keyboardVisibleNow(): Boolean {
+        // When window enumeration is available, its answer wins over potentially
+        // stale WindowInsets on our floating accessibility window.
+        val currentWindows = try { windows } catch (_: Exception) { null }
+        return if (!currentWindows.isNullOrEmpty()) {
+            currentWindows.any { it.type == AccessibilityWindowInfo.TYPE_INPUT_METHOD }
+        } else {
+            imeVisibleSignal
+        }
+    }
+
+    private fun keyboardTopPx(): Int {
+        val rect = Rect()
+        keyboardWindow()?.getBoundsInScreen(rect)
+        if (!rect.isEmpty && rect.top > 0) return rect.top
+        // Fallback for keyboards whose IME window isn't exposed.
+        return (screenH - imeBottomInsetPx).coerceAtLeast(0)
+    }
+
+    private fun onKeyboardVisibilityChanged(visible: Boolean, bottomInset: Int) {
         imeVisibleSignal = visible
+        imeBottomInsetPx = if (visible) bottomInset else 0
         updateOverlayVisibility()
     }
 
     private fun wantsOverlay(): Boolean =
-        masterEnabled() && (accessibilityFocusSignal || imeVisibleSignal || state != State.IDLE)
+        masterEnabled() && (keyboardVisibleNow() || state != State.IDLE)
+
+    private fun dockOverlayToKeyboard() {
+        val lp = layoutParams ?: return
+        val view = overlayView ?: return
+        val wm = getSystemService(WINDOW_SERVICE) as WindowManager
+        val margin = (MARGIN_DP * dp).toInt()
+        val keyboardVisible = keyboardVisibleNow()
+        val position = if (keyboardVisible) {
+            val desiredX = screenW - (DOCK_RIGHT_DP * dp).toInt() - lp.width
+            val desiredY = keyboardTopPx() + (DOCK_TOP_DP * dp).toInt()
+            BubbleSize.clampPosition(
+                desiredX, desiredY, screenW, screenH, lp.width, margin
+            )
+        } else {
+            savedHomePosition(lp.width)
+        }
+        if (lp.x == position.x && lp.y == position.y) return
+        lp.x = position.x
+        lp.y = position.y
+        try {
+            wm.updateViewLayout(view, lp)
+            feedbackLayoutParams?.let { feedbackParams ->
+                positionFeedback(feedbackParams, lp)
+                feedbackView?.let { wm.updateViewLayout(it, feedbackParams) }
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Unable to dock microphone", e)
+        }
+    }
+
+    private fun hideIdleFeedback() {
+        handler.removeCallbacks(hideFeedback)
+        feedbackView?.animate()?.cancel()
+        feedbackView?.visibility = View.GONE
+        feedbackView?.alpha = 0f
+    }
 
     private fun updateOverlayVisibility() {
+        dockOverlayToKeyboard()
         val shouldShow = wantsOverlay()
-        handler.removeCallbacks(overlayVisibilityDebounce)
         if (shouldShow == overlayShown) {
-            // Self-heal: the view can drift from overlayShown (e.g. after an app
-            // switch), leaving it hidden while it should show. Re-show it here.
             if (shouldShow && overlayView?.visibility != View.VISIBLE) animateOverlayIn()
             return
         }
-        // Only act once the new state has held for OVERLAY_DEBOUNCE_MS, so rapid
-        // focus flapping between apps doesn't restart the fades.
-        handler.postDelayed(overlayVisibilityDebounce, OVERLAY_DEBOUNCE_MS)
-    }
-
-    private val overlayVisibilityDebounce = Runnable { applyOverlayVisibility() }
-
-    private fun applyOverlayVisibility() {
-        val shouldShow = wantsOverlay()
-        if (shouldShow == overlayShown) return
         overlayShown = shouldShow
         if (shouldShow) animateOverlayIn() else animateOverlayOut()
     }
 
     private fun masterEnabled() = prefs().getBoolean("service_master_enabled", true)
 
-    /** Called from MainActivity when the "Background service" switch is
-     * toggled, so an already-idle overlay hides/shows immediately instead
-     * of waiting for the next focus event or poll tick. */
     fun refreshMasterEnabled() {
         handler.post { updateOverlayVisibility() }
     }
 
-    /** Shows the overlay at its target alpha immediately. No fade-in: an
-     * animation on a window the system hasn't drawn yet can stall at alpha 0. */
     private fun animateOverlayIn() {
-        handler.post {
-            val view = overlayView ?: return@post
-            view.animate().cancel()
-            view.visibility = View.VISIBLE
-            setTouchable(true)
-            view.alpha = if (state == State.IDLE) ALPHA_IDLE else ALPHA_ACTIVE
-        }
+        val view = overlayView ?: return
+        view.animate().cancel()
+        view.visibility = View.VISIBLE
+        setTouchable(true)
+        view.alpha = if (state == State.IDLE) ALPHA_IDLE else ALPHA_ACTIVE
     }
 
     private fun animateOverlayOut() {
-        handler.post {
-            val view = overlayView ?: return@post
-            view.animate().cancel()
-            view.animate()
-                .alpha(0f)
-                .setDuration(FADE_OUT_MS)
-                .setInterpolator(AccelerateInterpolator())
-                .withEndAction {
-                    view.visibility = View.INVISIBLE
-                    setTouchable(false)
-                }
-                .start()
-        }
+        val view = overlayView ?: return
+        view.animate().cancel()
+        // No animation and no pending runnable: keyboard closed means gone.
+        view.visibility = View.INVISIBLE
+        view.alpha = 0f
+        setTouchable(false)
+        if (state == State.IDLE) hideIdleFeedback()
     }
 
     private fun setTouchable(touchable: Boolean) {
@@ -589,7 +590,8 @@ class WhisperAccessibilityService : AccessibilityService() {
             visibility = View.INVISIBLE
             setOnApplyWindowInsetsListener { _, insets ->
                 try {
-                    onKeyboardVisibilityChanged(insets.isVisible(WindowInsets.Type.ime()))
+                    val ime = insets.getInsets(WindowInsets.Type.ime())
+                    onKeyboardVisibilityChanged(insets.isVisible(WindowInsets.Type.ime()), ime.bottom)
                 } catch (e: Exception) {
                     Log.e(TAG, "IME insets check failed", e)
                 }
@@ -686,6 +688,7 @@ class WhisperAccessibilityService : AccessibilityService() {
         feedbackView = feedback
         layoutParams = params
         feedbackLayoutParams = feedbackParams
+        updateOverlayVisibility()
     }
 
     private fun removeOverlay() {
@@ -750,10 +753,7 @@ class WhisperAccessibilityService : AccessibilityService() {
     private fun setOpacity(active: Boolean) {
         handler.post {
             overlayView?.animate()?.cancel()
-            overlayView?.animate()
-                ?.alpha(if (active) ALPHA_ACTIVE else ALPHA_IDLE)
-                ?.setDuration(ALPHA_FADE_MS)
-                ?.start()
+            overlayView?.alpha = if (active) ALPHA_ACTIVE else ALPHA_IDLE
         }
     }
 
