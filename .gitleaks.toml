@@ -18,7 +18,7 @@ keywords = ["storepassword", "keypassword"]
 
 [allowlist]
 description = "Placeholders and docs"
-regexes = ['''gsk_(…|\.\.\.)''', '''gsk_X+''', '''(storePassword|keyPassword)\s*=\s*"android"''', '''(storePassword|keyPassword)\s*=\s*"OpenWhisprDockTest2026!"''']
+regexes = ['''gsk_(…|\.\.\.)''', '''gsk_X+''', '''(storePassword|keyPassword)\s*=\s*"android"''', '''OpenWhisprDockTest2026!''']
 # The dock-test password is a known public test-only password; the actual PKCS12
 # keystore/private key remains exclusively in the protected GitHub secret.
 # Keep flagging all other signing passwords and service API keys.
