@@ -524,25 +524,50 @@ class WhisperAccessibilityService : AccessibilityService() {
         if (!refreshKeyboardSnapshot()) return
         if (suppressSuggestionsUntilRealEdit) return
         val now = android.os.SystemClock.uptimeMillis()
-        // UI window trees can change dozens of times per second. Throttle
-        // ONLY this optional suggestion scan, not V4's keyboard detection.
+        // Only optional UI metadata scanning is throttled. Keyboard open/close
+        // and recording transitions continue at their original V4 speed.
         if (now - lastSuggestionScanUptimeMs < 120L) return
         lastSuggestionScanUptimeMs = now
         val ime = keyboardWindow() ?: return
         val root = ime.root ?: return
         try {
-            // The candidate strip may be hidden from accessibility completely.
-            // Only examine structural view IDs, never the words or labels.
-            var visibleStripFound = false
-            var recognizedContainer = false
+            val isGboard = root.packageName?.toString() ==
+                GboardChromeEvidence.PACKAGE_NAME
+            val imeBounds = Rect()
+            root.getBoundsInScreen(imeBounds)
+            val toolbarBottom = imeBounds.top + (90 * dp).toInt()
+
+            var visibleCandidateItem = false
+            var visibleCandidateContainer = false
+            val toolbarTokens = mutableSetOf<String>()
             var nodesVisited = 0
+
             fun search(node: AccessibilityNodeInfo) {
-                if (nodesVisited++ > 180) return
-                if (SuggestionDockState.isCandidateStripId(node.viewIdResourceName)) {
-                    recognizedContainer = true
-                    if (node.isVisibleToUser) visibleStripFound = true
-                    return
+                if (nodesVisited++ >= 240) return
+                if (!node.isVisibleToUser) return
+                val viewId = node.viewIdResourceName
+                if (GboardChromeEvidence.isCandidateItemId(viewId)) {
+                    visibleCandidateItem = true
+                } else if (GboardChromeEvidence.isCandidateContainerId(viewId)) {
+                    visibleCandidateContainer = true
                 }
+
+                // Only consider fixed Gboard toolbar buttons near the top of
+                // the keyboard. No candidate words or editable-field text
+                // are read; only whitelisted shortcut descriptions/IDs.
+                if (isGboard && node.isClickable &&
+                    !GboardChromeEvidence.isCandidateItemId(viewId)) {
+                    val rect = Rect()
+                    node.getBoundsInScreen(rect)
+                    if (rect.top >= imeBounds.top - (4 * dp).toInt() &&
+                        rect.centerY() <= toolbarBottom) {
+                        val token = GboardChromeEvidence.toolbarToken(
+                            viewId, node.contentDescription
+                        )
+                        if (token != null) toolbarTokens.add(token)
+                    }
+                }
+
                 for (i in 0 until node.childCount) {
                     val child = node.getChild(i) ?: continue
                     try {
@@ -550,16 +575,26 @@ class WhisperAccessibilityService : AccessibilityService() {
                     } finally {
                         child.recycle()
                     }
-                    if (visibleStripFound) return
+                    if (nodesVisited >= 240) break
                 }
             }
+
             search(root)
             val before = suggestionState.shouldUseAlternativePosition
-            if (recognizedContainer) {
-                suggestionState.onRecognizedStructure(visibleStripFound)
-            } else if (suggestionState.detectionMethod == "Gboard structure" && nodesVisited <= 180) {
-                // A previously detected strip actually disappeared.
-                suggestionState.onRecognizedStructure(false)
+            val plainToolbar = isGboard &&
+                GboardChromeEvidence.showsPlainToolbar(
+                    visibleCandidateItem, toolbarTokens
+                )
+            when {
+                visibleCandidateItem -> suggestionState.onRecognizedStructure(true)
+                plainToolbar -> suggestionState.onPlainToolbarVisible()
+                visibleCandidateContainer -> suggestionState.onRecognizedStructure(true)
+                suggestionState.detectionMethod == "Gboard structure" &&
+                    nodesVisited < 240 ->
+                    suggestionState.onRecognizedStructure(false)
+                // Else: Gboard did not expose enough metadata. Preserve
+                // the sticky fallback rather than falsely claiming words
+                // disappeared after an arbitrary timer.
             }
             if (before != suggestionState.shouldUseAlternativePosition)
                 updateOverlayVisibility()
