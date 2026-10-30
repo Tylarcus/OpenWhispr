@@ -411,7 +411,10 @@ class WhisperAccessibilityService : AccessibilityService() {
         if (node == null) return null
         val input = node.inputType
         if (!node.isEditable && !node.isPassword && input == 0) return null
-        return KeyboardLayoutClassifier.classify(input, node.isPassword)
+        // Hint/accessibility label is fixed UI metadata (including HTML
+        // aria-label); never use node.text or record spoken/typed values.
+        val label = node.hintText?.toString() ?: node.contentDescription?.toString()
+        return KeyboardLayoutClassifier.classify(input, node.isPassword, label)
     }
 
     private fun focusedEditorLayout(): KeyboardLayoutProfile? {
@@ -422,7 +425,7 @@ class WhisperAccessibilityService : AccessibilityService() {
             // On some devices the IME becomes the active window; search the
             // underlying APPLICATION windows rather than keyboard keys.
             val appWindows = windows?.filter {
-                it.type == AccessibilityWindowInfo.TYPE_APPLICATION && it.isActive
+                it.type == AccessibilityWindowInfo.TYPE_APPLICATION
             }.orEmpty()
             for (window in appWindows) {
                 val node = window.root?.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
