@@ -28,6 +28,19 @@ class OverlayPlacementTest {
         assertTrue(restored.y + 540 <= 2340)
     }
 
+    @Test fun zeroMarginAllowsExactScreenEdges() {
+        val farRight = OverlayPlacement.restore(
+            OverlayPlacement.Fractions(1f, 1f), 1080, 2340, 80, 0
+        )
+        assertEquals(1000, farRight.x)
+        assertEquals(2260, farRight.y)
+        val farLeft = OverlayPlacement.restore(
+            OverlayPlacement.Fractions(0f, 0f), 1080, 2340, 80, 0
+        )
+        assertEquals(0, farLeft.x)
+        assertEquals(0, farLeft.y)
+    }
+
     @Test fun invalidFractionsAreClamped() {
         val restored = OverlayPlacement.restore(OverlayPlacement.Fractions(5f, -3f), 1080, 2340, 40, 8)
         assertEquals(1032, restored.x)
