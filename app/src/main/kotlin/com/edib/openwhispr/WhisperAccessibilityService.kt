@@ -99,6 +99,7 @@ class WhisperAccessibilityService : AccessibilityService() {
     private val dismissal = DismissDockState()
     private val suggestionState = SuggestionDockState()
     private var lastFocusedEditorId: Int? = null
+    private var lastSuggestionScanUptimeMs = 0L
     private var clipboardOnlySession = false
     private var dismissTargetView: TextView? = null
     private var dismissTargetParams: WindowManager.LayoutParams? = null
@@ -173,8 +174,11 @@ class WhisperAccessibilityService : AccessibilityService() {
                 AccessibilityEvent.TYPE_VIEW_FOCUSED,
                 AccessibilityEvent.TYPE_VIEW_CLICKED -> {
                     refreshAccessibilityFocusSignal()
-                    if (prefs().getBoolean("suggestions_dock_enabled", false))
+                    if (prefs().getBoolean("suggestions_dock_enabled", false)) {
+                        if (event.eventType == AccessibilityEvent.TYPE_VIEW_FOCUSED)
+                            onEditorFocusChanged(event)
                         checkSuggestionStripOnWindowEvent()
+                    }
                 }
                 AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED -> {
                     if (prefs().getBoolean("suggestions_dock_enabled", false))
@@ -371,6 +375,19 @@ class WhisperAccessibilityService : AccessibilityService() {
         updateOverlayVisibility()
     }
 
+    private fun onEditorFocusChanged(event: AccessibilityEvent) {
+        val node = event.source ?: return
+        if (!node.isEditable) return
+        // Only an editor identity token: never a word or text string.
+        val token = (node.viewIdResourceName ?: node.className?.toString().orEmpty())
+            .hashCode() xor event.windowId
+        if (lastFocusedEditorId != null && token != lastFocusedEditorId) {
+            suggestionState.onEditorChanged()
+            updateOverlayVisibility()
+        }
+        lastFocusedEditorId = token
+    }
+
     private fun onTextFieldChanged(event: AccessibilityEvent) {
         if (!refreshKeyboardSnapshot()) return
         if (event.packageName?.toString() == packageName) return
@@ -385,17 +402,24 @@ class WhisperAccessibilityService : AccessibilityService() {
 
     private fun checkSuggestionStripOnWindowEvent() {
         if (!refreshKeyboardSnapshot()) return
+        val now = android.os.SystemClock.uptimeMillis()
+        // UI window trees can change dozens of times per second. Throttle
+        // ONLY this optional suggestion scan, not V4's keyboard detection.
+        if (now - lastSuggestionScanUptimeMs < 120L) return
+        lastSuggestionScanUptimeMs = now
         val ime = keyboardWindow() ?: return
         val root = ime.root ?: return
         try {
             // The candidate strip may be hidden from accessibility completely.
             // Only examine structural view IDs, never the words or labels.
             var visibleStripFound = false
+            var recognizedContainer = false
             var nodesVisited = 0
             fun search(node: AccessibilityNodeInfo) {
                 if (nodesVisited++ > 180) return
                 if (SuggestionDockState.isCandidateStripId(node.viewIdResourceName)) {
-                    visibleStripFound = node.isVisibleToUser
+                    recognizedContainer = true
+                    if (node.isVisibleToUser) visibleStripFound = true
                     return
                 }
                 for (i in 0 until node.childCount) {
@@ -409,12 +433,15 @@ class WhisperAccessibilityService : AccessibilityService() {
                 }
             }
             search(root)
-            if (visibleStripFound) {
-                suggestionState.onRecognizedStructure(true)
-                updateOverlayVisibility()
+            val before = suggestionState.shouldUseAlternativePosition
+            if (recognizedContainer) {
+                suggestionState.onRecognizedStructure(visibleStripFound)
+            } else if (suggestionState.detectionMethod == "Gboard structure" && nodesVisited <= 180) {
+                // A previously detected strip actually disappeared.
+                suggestionState.onRecognizedStructure(false)
             }
-            // Absence of an ID isn't evidence that the suggestions disappeared:
-            // many Gboard versions hide these child nodes, so keep fallback.
+            if (before != suggestionState.shouldUseAlternativePosition)
+                updateOverlayVisibility()
         } catch (e: Exception) {
             Log.w(TAG, "Suggestion structure not exposed", e)
         } finally {
