@@ -740,7 +740,7 @@ class WhisperAccessibilityService : AccessibilityService() {
                 y = (cy - size / 2).toInt()
             }
             val target = TextView(this).apply {
-                text = "✕\\nClose"
+                text = "✕\nClose"
                 gravity = Gravity.CENTER
                 textSize = 13f
                 setTextColor(Color.WHITE)
@@ -1345,6 +1345,11 @@ class WhisperAccessibilityService : AccessibilityService() {
         CommandProcessor.process(fieldText, instruction, apiKey) { result ->
             handler.post {
                 val out = result.text?.trim()
+                if (clipboardOnlySession) {
+                    if (!out.isNullOrBlank()) copyToClipboard(out)
+                    goIdle()
+                    return@post
+                }
                 when {
                     out.isNullOrBlank() ->
                         toast(getString(R.string.command_failed, result.error ?: getString(R.string.empty_response)))
@@ -1375,6 +1380,10 @@ class WhisperAccessibilityService : AccessibilityService() {
      * instead of inserting at the cursor/selection -- used by voice
      * commands, which transform the whole field rather than append to it. */
     private fun replaceFieldText(text: String) {
+        if (clipboardOnlySession) {
+            copyToClipboard(text)
+            return
+        }
         val candidates = findInjectionCandidates()
         var replaced = false
         try {
@@ -1442,6 +1451,9 @@ class WhisperAccessibilityService : AccessibilityService() {
         feedbackDurationMs: Long = 2000
     ): Boolean {
         copyToClipboard(text)
+        // Final safety gate: even asynchronous cleanup/command callbacks must
+        // never paste after a user drags the mic into Close.
+        if (clipboardOnlySession) return false
 
         val candidates = findInjectionCandidates()
         Log.i(TAG, "Injecting text into ${candidates.size} candidate node(s)")
