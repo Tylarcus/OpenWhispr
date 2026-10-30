@@ -60,7 +60,7 @@ class WhisperAccessibilityService : AccessibilityService() {
 
         // How often we re-check the focused node as a failsafe, in case an
         // app never fires a focus-related accessibility event at all.
-        private const val FOCUS_POLL_MS = 100L
+        private const val FOCUS_POLL_MS = 250L
 
         // No visibility debounce: hiding the keyboard must hide the idle mic now.
 
@@ -100,6 +100,7 @@ class WhisperAccessibilityService : AccessibilityService() {
     // Focus alone must NOT display an idle microphone. Only a visible IME
     // qualifies; an ongoing recording/transcription remains accessible.
     private var imeVisibleSignal = false
+    private var keyboardVisibleCached = false
     private var imeBottomInsetPx = 0
     private var isDraggingOverlay = false
     private var gestureStartedWithKeyboard = false
@@ -159,7 +160,13 @@ class WhisperAccessibilityService : AccessibilityService() {
         // could take the service down entirely, requiring the user to clear
         // app storage and re-grant the accessibility permission.
         try {
-            refreshAccessibilityFocusSignal()
+            when (event?.eventType) {
+                AccessibilityEvent.TYPE_WINDOWS_CHANGED,
+                AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED,
+                AccessibilityEvent.TYPE_VIEW_FOCUSED,
+                AccessibilityEvent.TYPE_VIEW_CLICKED ->
+                    refreshAccessibilityFocusSignal()
+            }
         } catch (e: Exception) {
             Log.e(TAG, "onAccessibilityEvent handling failed", e)
         }
@@ -308,16 +315,20 @@ class WhisperAccessibilityService : AccessibilityService() {
             null
         }
 
-    private fun keyboardVisibleNow(): Boolean {
-        // When window enumeration is available, its answer wins over potentially
-        // stale WindowInsets on our floating accessibility window.
+    // Read Android window state ONCE per update. In V3 it could be queried
+    // independently during positioning and visibility, yielding two different
+    // answers while Gboard was opening/closing.
+    private fun refreshKeyboardSnapshot(): Boolean {
         val currentWindows = try { windows } catch (_: Exception) { null }
-        return if (!currentWindows.isNullOrEmpty()) {
+        keyboardVisibleCached = if (!currentWindows.isNullOrEmpty()) {
             currentWindows.any { it.type == AccessibilityWindowInfo.TYPE_INPUT_METHOD }
         } else {
             imeVisibleSignal
         }
+        return keyboardVisibleCached
     }
+
+    private fun keyboardVisibleNow(): Boolean = keyboardVisibleCached
 
     private fun keyboardTopPx(): Int {
         val rect = Rect()
@@ -328,6 +339,7 @@ class WhisperAccessibilityService : AccessibilityService() {
     }
 
     private fun onKeyboardVisibilityChanged(visible: Boolean, bottomInset: Int) {
+        if (imeVisibleSignal == visible && imeBottomInsetPx == (if (visible) bottomInset else 0)) return
         imeVisibleSignal = visible
         imeBottomInsetPx = if (visible) bottomInset else 0
         updateOverlayVisibility()
@@ -395,6 +407,7 @@ class WhisperAccessibilityService : AccessibilityService() {
     }
 
     private fun updateOverlayVisibility() {
+        refreshKeyboardSnapshot()
         dockOverlayToKeyboard()
         val shouldShow = wantsOverlay()
         if (shouldShow == overlayShown) {
