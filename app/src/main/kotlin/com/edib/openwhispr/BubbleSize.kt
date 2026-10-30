@@ -7,7 +7,7 @@ object BubbleSize {
     const val MIN_PERCENT = 5
     const val DEFAULT_PERCENT = 100
     const val MAX_PERCENT = 1000
-    const val STEP_PERCENT = 5
+    const val STEP_PERCENT = 1
 
     const val BUTTON_DP = 44
     const val RING_DP = 56
