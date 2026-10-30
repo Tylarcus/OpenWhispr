@@ -8,8 +8,8 @@ class BubbleSizeTest {
     @Test
     fun `missing and invalid preferences use standard size`() {
         assertEquals(BubbleSize.DEFAULT_PERCENT, BubbleSize.preferencePercent(null))
-        assertEquals(BubbleSize.DEFAULT_PERCENT, BubbleSize.preferencePercent(89))
-        assertEquals(BubbleSize.DEFAULT_PERCENT, BubbleSize.preferencePercent(96))
+        assertEquals(89, BubbleSize.preferencePercent(89))
+        assertEquals(96, BubbleSize.preferencePercent(96))
         assertEquals(BubbleSize.DEFAULT_PERCENT, BubbleSize.preferencePercent(1005))
     }
 
@@ -38,10 +38,10 @@ class BubbleSizeTest {
     }
 
     @Test
-    fun `slider values are bounded and snapped to five percent increments`() {
+    fun `slider values are bounded at one percent precision`() {
         assertEquals(BubbleSize.MIN_PERCENT, BubbleSize.sliderPercent(0))
-        assertEquals(90, BubbleSize.sliderPercent(92))
-        assertEquals(95, BubbleSize.sliderPercent(93))
+        assertEquals(92, BubbleSize.sliderPercent(92))
+        assertEquals(93, BubbleSize.sliderPercent(93))
         assertEquals(200, BubbleSize.sliderPercent(200))
         assertEquals(115, BubbleSize.preferencePercent(115))
     }
