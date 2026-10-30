@@ -38,6 +38,10 @@ android {
     }
 
     buildTypes {
+        debug {
+            applicationIdSuffix = ".docktest"
+            versionNameSuffix = "-docktest"
+        }
         release {
             signingConfig = signingConfigs.getByName("release")
         }
