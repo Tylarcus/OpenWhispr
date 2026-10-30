@@ -3,7 +3,7 @@ name: Gboard Dock Test APK
 on:
   push:
     branches:
-      - feature/gboard-dock-test
+      - feature/gboard-dock-v3
   workflow_dispatch:
 
 permissions:
@@ -30,6 +30,11 @@ jobs:
           yes | "$SDKMANAGER" --licenses > /dev/null || true
           "$SDKMANAGER" "platforms;android-35" "build-tools;35.0.0"
 
+      - name: Run microphone placement tests
+        run: |
+          chmod +x ./gradlew
+          ./gradlew testDebugUnitTest --no-daemon
+
       - name: Build separately-installable debug APK
         run: |
           chmod +x ./gradlew
@@ -46,11 +51,11 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "gboard-dock-v2-test" \
-            "app/build/outputs/apk/debug/app-debug.apk#OpenWhispr-Gboard-Dock-Test-v2.apk" \
+          gh release create "gboard-dock-v3-test" \
+            "app/build/outputs/apk/debug/app-debug.apk#OpenWhispr-Gboard-Dock-Test-v3.apk" \
             --repo "${{ github.repository }}" \
             --target "${{ github.sha }}" \
-            --title "Gboard Dock Test V2 (experimental debug APK)" \
+            --title "Gboard Dock Test V3 (experimental debug APK)" \
             --notes "Experimental keyboard-docking build. Not tested on physical hardware. Uses applicationId com.edib.openwhispr.docktest, so it does not overwrite the official OpenWhispr app. Disable the original accessibility service while trying the test build." \
             --prerelease \
             --latest=false
