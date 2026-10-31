@@ -58,6 +58,13 @@ class AudioSilenceReducerTest {
         assertTrue(result.pcm.isEmpty())
     }
 
+    @Test fun isolatedClickInTwentySecondsOfSilenceDoesNotProduceDictation() {
+        val input = concat(frame(0, 9000), frame(5000, 20), frame(0, 11000))
+        val result = AudioSilenceReducer.reduce(input)
+        assertFalse(result.hasActivity)
+        assertTrue(result.pcm.isEmpty())
+    }
+
     @Test fun shortQuickUtteranceIsKept() {
         val input = frame(1200, 160)
         val result = AudioSilenceReducer.reduce(input)
