@@ -1672,86 +1672,123 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun promptCustomInstructions() {
-        // The original PostProcessor.DEFAULT_PROMPT is intentionally unchanged.
-        // Both text fields are sent through the existing custom addendum pathway.
+        // This dialog deliberately does not contain an EditText. The original
+        // compact dialog nested TWO editors in a ScrollView; on small phones
+        // the keyboard/dialog clipping made the long prompt effectively unusable.
         UserPromptPreset.migrateIfNeeded(prefs())
-        val enabledSwitch = MaterialSwitch(this).apply {
-            isChecked = UserPromptPreset.enabled(prefs())
-            isClickable = false
-        }
-        val presetInput = EditText(this).apply {
-            hint = "Speech-preserving format instructions"
-            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE
-            minLines = 5
-            maxLines = 9
-            setHorizontallyScrolling(false)
-            gravity = Gravity.TOP or Gravity.START
-            setText(UserPromptPreset.presetText(prefs()))
-            setSelection(0)
-        }
-        val extraInput = EditText(this).apply {
-            hint = "Optional additional instructions (names, tone, formatting, etc.)"
-            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE
-            minLines = 3
-            maxLines = 7
-            setHorizontallyScrolling(false)
-            gravity = Gravity.TOP or Gravity.START
-            setText(prefs().getString(UserPromptPreset.EXTRA_KEY, ""))
-        }
-        val panel = vertical(0, dp(8)).apply {
-            isFocusableInTouchMode = true
-            requestFocus() // Keep the editor at the top instead of jumping to the end of the long preset.
-        }
-        panel.addView(TextView(this).apply {
-            text = "OpenWispr's original cleanup rules remain unchanged. The editable " +
-                "preset and your extra instructions are appended to those rules " +
-                "through the same custom-instructions mechanism."
+        val content = vertical(dp(6), dp(8))
+        content.addView(TextView(this).apply {
+            text = "The original OpenWispr cleanup rules are unchanged. " +
+                "This optional preset and your extra text are both normal custom instructions."
             textSize = 13f
             setTextColor(attrColor(android.R.attr.textColorSecondary))
-            setPadding(0, 0, 0, dp(8))
+            setPadding(0, 0, 0, dp(10))
         })
-        panel.addView(settingsRow(
-            "Use speech-preserving preset",
-            "On by default. Switch off to use only the original cleanup rules " +
-                "and any extra instructions you add.",
-            enabledSwitch
-        ) {
-            enabledSwitch.isChecked = !enabledSwitch.isChecked
-        })
-        panel.addView(TextView(this).apply {
-            text = "Editable speech formatter"
-            textSize = 15f
-            setTypeface(typeface, Typeface.BOLD)
-            setPadding(0, dp(10), 0, dp(4))
-        })
-        panel.addView(presetInput)
-        panel.addView(TextView(this).apply {
-            text = "Your extra custom instructions"
-            textSize = 15f
-            setTypeface(typeface, Typeface.BOLD)
-            setPadding(0, dp(14), 0, dp(4))
-        })
-        panel.addView(extraInput)
-        panel.addView(TextView(this).apply {
-            text = "Both fields are saved separately and included in encrypted settings backups."
-            textSize = 12f
-            setTextColor(attrColor(android.R.attr.textColorSecondary))
-            setPadding(0, dp(6), 0, 0)
-        })
-        val dialog = android.app.AlertDialog.Builder(this)
-            .setTitle(getString(R.string.add_custom_instructions))
-            .setView(scrollableDialogContent(panel))
-            .setPositiveButton(getString(R.string.save)) { _, _ ->
-                prefs().edit()
-                    .putBoolean(UserPromptPreset.ENABLED_KEY, enabledSwitch.isChecked)
-                    .putString(UserPromptPreset.TEXT_KEY, presetInput.text.toString().trim())
-                    .putString(UserPromptPreset.EXTRA_KEY, extraInput.text.toString().trim())
-                    .apply()
+        val presetSwitch = MaterialSwitch(this).apply {
+            isChecked = UserPromptPreset.enabled(prefs())
+            contentDescription = "Use speech-preserving preset"
+            setOnCheckedChangeListener { _, checked ->
+                prefs().edit().putBoolean(UserPromptPreset.ENABLED_KEY, checked).apply()
                 refresh()
             }
-            .setNegativeButton(getString(R.string.cancel), null)
-            .create()
-        showResizingDialog(dialog)
+        }
+        content.addView(LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            addView(TextView(this@MainActivity).apply {
+                text = "Use speech-preserving preset"
+                textSize = 16f
+                setTextColor(attrColor(android.R.attr.textColorPrimary))
+                layoutParams = LinearLayout.LayoutParams(0, LP_WRAP, 1f).apply {
+                    marginEnd = dp(12)
+                }
+            })
+            addView(presetSwitch)
+        })
+        content.addView(TextView(this).apply {
+            text = "On by default. Switch off without deleting or editing your saved preset."
+            textSize = 12f
+            setTextColor(attrColor(android.R.attr.textColorSecondary))
+            setPadding(0, 0, 0, dp(12))
+        })
+        content.addView(settingsRow(
+            "Edit speech-preserving preset",
+            "Full prompt (${UserPromptPreset.presetText(prefs()).length} characters). Opens in a separate, scrollable editor."
+        ) {
+            editCustomInstructionText(
+                "Speech-preserving preset",
+                UserPromptPreset.TEXT_KEY,
+                UserPromptPreset.presetText(prefs()),
+                showRestoreDefault = true
+            )
+        })
+        content.addView(settingsRow(
+            "Additional custom instructions",
+            if (prefs().getString(UserPromptPreset.EXTRA_KEY, "").orEmpty().isBlank())
+                "Optional; currently empty"
+            else "Your additional instructions are saved. Tap to edit."
+        ) {
+            editCustomInstructionText(
+                "Additional custom instructions",
+                UserPromptPreset.EXTRA_KEY,
+                prefs().getString(UserPromptPreset.EXTRA_KEY, "").orEmpty()
+            )
+        })
+        android.app.AlertDialog.Builder(this)
+            .setTitle("Custom instructions")
+            .setView(scrollableDialogContent(content))
+            .setPositiveButton("Done", null)
+            .show()
+    }
+
+    private fun editCustomInstructionText(
+        title: String,
+        preferenceKey: String,
+        initialText: String,
+        showRestoreDefault: Boolean = false
+    ) {
+        // A dedicated editor, with one bounded EditText taking its own scroll
+        // gestures. Do not put it inside another scrolling dialog.
+        val editor = EditText(this).apply {
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE
+            setHorizontallyScrolling(false)
+            isVerticalScrollBarEnabled = true
+            gravity = Gravity.TOP or Gravity.START
+            textSize = 14f
+            setPadding(dp(12), dp(12), dp(12), dp(12))
+            setText(initialText)
+            setSelection(0)
+        }
+        val availableHeight = resources.displayMetrics.heightPixels
+        val editorHeight = minOf(dp(520), (availableHeight * 0.52f).toInt())
+        val editorFrame = FrameLayout(this).apply {
+            setPadding(dp(18), dp(8), dp(18), dp(4))
+            addView(editor, FrameLayout.LayoutParams(LP_MATCH, editorHeight))
+        }
+        val builder = android.app.AlertDialog.Builder(this)
+            .setTitle(title)
+            .setView(editorFrame)
+            .setPositiveButton("Save") { _, _ ->
+                prefs().edit().putString(preferenceKey, editor.text.toString().trim()).apply()
+                refresh()
+            }
+            .setNegativeButton("Cancel", null)
+        if (showRestoreDefault) {
+            builder.setNeutralButton("Restore default", null)
+        }
+        val dialog = builder.create()
+        dialog.show()
+        dialog.window?.setSoftInputMode(
+            android.view.WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_HIDDEN or
+                android.view.WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE
+        )
+        if (showRestoreDefault) {
+            dialog.getButton(android.app.AlertDialog.BUTTON_NEUTRAL).setOnClickListener {
+                // Preview the reset; only Save persists the change.
+                editor.setText(UserPromptPreset.DEFAULT_TEXT)
+                editor.setSelection(0)
+            }
+        }
     }
 
     private fun promptTriggerPhrase() {
