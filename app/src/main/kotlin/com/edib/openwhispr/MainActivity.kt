@@ -96,6 +96,9 @@ class MainActivity : AppCompatActivity() {
         if (!prefs().contains("welcome_done") && prefs().all.isEmpty()) {
             window.decorView.post { showWelcome() }
         }
+        // Keep a user's previously pasted long formatter as their editable preset,
+        // never duplicate it in the separate "extra instructions" field.
+        UserPromptPreset.migrateIfNeeded(prefs())
 
         // [ui] Android 12+ drops the splash as soon as the first frame is
         // drawn, which would cut the icon animation short on a fast phone.
@@ -458,12 +461,6 @@ class MainActivity : AppCompatActivity() {
             textSize = 13f
             setPadding(dp(24), dp(4), dp(24), dp(12))
             setTextColor(attrColor(android.R.attr.textColorSecondary))
-        })
-        settingsContainer.addView(group().apply {
-            addView(settingsRow(
-                "See position examples",
-                "Simple illustrations of positions 1, 2 and 3, with the keyboard open or closed."
-            ) { showPositionExamples() })
         })
         val positionsLockedSwitch = MaterialSwitch(this).apply {
             isChecked = prefs().getBoolean("positions_locked", true)
@@ -832,11 +829,7 @@ class MainActivity : AppCompatActivity() {
                 .show()
         })
 
-        val versionName = try {
-            packageManager.getPackageInfo(packageName, 0).versionName ?: getString(R.string.unknown_version)
-        } catch (e: Exception) {
-            getString(R.string.unknown_version)
-        }
+        val versionName = installedVersionLabel()
         // [ui] The separate "Version" row is folded into "Check for updates" below.
 
         aboutGroup.addView(settingsRow(getString(R.string.github), getString(R.string.github_summary)) {
@@ -1114,11 +1107,12 @@ class MainActivity : AppCompatActivity() {
 
         keyRowSub.text = if (hasGroqKey) getString(R.string.saved_securely) else getString(R.string.key_needed_hint)
 
-        val customInstructions = prefs().getString("custom_instructions", "") ?: ""
-        customInstructionsRowSub.text = if (customInstructions.isBlank())
-            getString(R.string.tap_add_refinements)
-        else
-            customInstructions.replace("\n", " ")
+        customInstructionsRowSub.text = buildString {
+            append(if (UserPromptPreset.enabled(prefs())) "Speech formatter on" else "Speech formatter off")
+            if (prefs().getString(UserPromptPreset.EXTRA_KEY, "").orEmpty().isNotBlank())
+                append(" · Extra instructions added")
+            append(" · Tap to edit")
+        }
 
         val cur = prefs().getString("model_name", "") ?: ""
         if (cur.isBlank() || !File(filesDir, "models/$cur").exists()) {
@@ -1200,6 +1194,21 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private fun installedVersionLabel(): String {
+        return try {
+            val pkg = packageManager.getPackageInfo(packageName, 0)
+            val name = pkg.versionName ?: getString(R.string.unknown_version)
+            val code = pkg.longVersionCode
+            // Our separately signed debug APKs share the same human-readable
+            // version name; the CI build number is the meaningful identifier.
+            if (name.endsWith("-docktest") && code > 40000L)
+                "$name · Build #${code - 40000L}"
+            else name
+        } catch (_: Exception) {
+            getString(R.string.unknown_version)
+        }
+    }
+
     /** Checks this repo's GitHub Releases. No backend involved. Shows a
      * dialog linking to the release page when a newer version is
      * available. [privacy] Runs on app-open only if the user turned on
@@ -1212,7 +1221,7 @@ class MainActivity : AppCompatActivity() {
         } catch (e: Exception) {
             null
         } ?: return
-        val currentVersion = infoInstalled.versionName ?: "4.0.0-docktest"
+        val currentVersion = installedVersionLabel()
         val currentBuildCode = infoInstalled.longVersionCode
 
         UpdateChecker.checkForUpdate(prefs(), currentBuildCode, force) { result ->
@@ -1663,31 +1672,78 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun promptCustomInstructions() {
-        // The base cleanup prompt itself is fixed in PostProcessor and never
-        // shown here -- this only lets the user append their own extra
-        // refinements on top of it (see PostProcessor.effectivePrompt).
-        val input = EditText(this).apply {
-            hint = getString(R.string.custom_instructions_hint)
-            inputType = android.text.InputType.TYPE_CLASS_TEXT or android.text.InputType.TYPE_TEXT_FLAG_MULTI_LINE
-            minLines = 4
+        // The original PostProcessor.DEFAULT_PROMPT is intentionally unchanged.
+        // Both text fields are sent through the existing custom addendum pathway.
+        UserPromptPreset.migrateIfNeeded(prefs())
+        val enabledSwitch = MaterialSwitch(this).apply {
+            isChecked = UserPromptPreset.enabled(prefs())
+            isClickable = false
+        }
+        val presetInput = EditText(this).apply {
+            hint = "Speech-preserving format instructions"
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE
+            minLines = 5
+            maxLines = 9
             setHorizontallyScrolling(false)
             gravity = Gravity.TOP or Gravity.START
-            setText(prefs().getString("custom_instructions", ""))
+            setText(UserPromptPreset.presetText(prefs()))
+            setSelection(text.length)
         }
-        val content = vertical(0, 0).apply {
-            addView(TextView(this@MainActivity).apply {
-                text = getString(R.string.custom_instructions_help)
-                textSize = 14f
-                setTextColor(attrColor(android.R.attr.textColorSecondary))
-                setPadding(0, 0, 0, dp(8))
-            })
-            addView(input)
+        val extraInput = EditText(this).apply {
+            hint = "Optional additional instructions (names, tone, formatting, etc.)"
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE
+            minLines = 3
+            maxLines = 7
+            setHorizontallyScrolling(false)
+            gravity = Gravity.TOP or Gravity.START
+            setText(prefs().getString(UserPromptPreset.EXTRA_KEY, ""))
         }
+        val panel = vertical(0, dp(8))
+        panel.addView(TextView(this).apply {
+            text = "OpenWispr's original cleanup rules remain unchanged. The editable " +
+                "preset and your extra instructions are appended to those rules " +
+                "through the same custom-instructions mechanism."
+            textSize = 13f
+            setTextColor(attrColor(android.R.attr.textColorSecondary))
+            setPadding(0, 0, 0, dp(8))
+        })
+        panel.addView(settingsRow(
+            "Use speech-preserving preset",
+            "On by default. Switch off to use only the original cleanup rules " +
+                "and any extra instructions you add.",
+            enabledSwitch
+        ) {
+            enabledSwitch.isChecked = !enabledSwitch.isChecked
+        })
+        panel.addView(TextView(this).apply {
+            text = "Editable speech formatter"
+            textSize = 15f
+            setTypeface(typeface, Typeface.BOLD)
+            setPadding(0, dp(10), 0, dp(4))
+        })
+        panel.addView(presetInput)
+        panel.addView(TextView(this).apply {
+            text = "Your extra custom instructions"
+            textSize = 15f
+            setTypeface(typeface, Typeface.BOLD)
+            setPadding(0, dp(14), 0, dp(4))
+        })
+        panel.addView(extraInput)
+        panel.addView(TextView(this).apply {
+            text = "Both fields are saved separately and included in encrypted settings backups."
+            textSize = 12f
+            setTextColor(attrColor(android.R.attr.textColorSecondary))
+            setPadding(0, dp(6), 0, 0)
+        })
         val dialog = android.app.AlertDialog.Builder(this)
             .setTitle(getString(R.string.add_custom_instructions))
-            .setView(scrollableDialogContent(content))
+            .setView(scrollableDialogContent(panel))
             .setPositiveButton(getString(R.string.save)) { _, _ ->
-                prefs().edit().putString("custom_instructions", input.text.toString().trim()).apply()
+                prefs().edit()
+                    .putBoolean(UserPromptPreset.ENABLED_KEY, enabledSwitch.isChecked)
+                    .putString(UserPromptPreset.TEXT_KEY, presetInput.text.toString().trim())
+                    .putString(UserPromptPreset.EXTRA_KEY, extraInput.text.toString().trim())
+                    .apply()
                 refresh()
             }
             .setNegativeButton(getString(R.string.cancel), null)
@@ -1879,90 +1935,6 @@ class MainActivity : AppCompatActivity() {
         larger = getString(R.string.bubble_larger_accessibility),
         percentUnit = getString(R.string.percent_unit),
     )
-    /** Anonymous schematic examples, deliberately not using the owner's private
-     * chat screenshots as assets in this public repository. */
-    private fun showPositionExamples() {
-        val content = vertical(0, dp(4))
-        fun example(title: String, explanation: String, keyboardOpen: Boolean, micOverKeyboard: Boolean) {
-            content.addView(TextView(this).apply {
-                text = title
-                textSize = 16f
-                setTypeface(typeface, Typeface.BOLD)
-                setTextColor(attrColor(android.R.attr.textColorPrimary))
-                setPadding(0, dp(12), 0, dp(4))
-            })
-            content.addView(TextView(this).apply {
-                text = explanation
-                textSize = 13f
-                setTextColor(attrColor(android.R.attr.textColorSecondary))
-                setPadding(0, 0, 0, dp(8))
-            })
-            val mock = FrameLayout(this).apply {
-                background = GradientDrawable().apply {
-                    cornerRadius = dp(14).toFloat()
-                    setColor(0xFF292830.toInt())
-                }
-                layoutParams = LinearLayout.LayoutParams(LP_MATCH, dp(100))
-            }
-            mock.addView(TextView(this).apply {
-                text = "Message field"
-                textSize = 12f
-                setTextColor(0xFFB7B4C5.toInt())
-                setPadding(dp(14), dp(14), 0, 0)
-            }, FrameLayout.LayoutParams(LP_MATCH, dp(42), Gravity.TOP))
-            if (keyboardOpen) {
-                mock.addView(TextView(this).apply {
-                    text = "▦     Clipboard       GIF                Gboard"
-                    textSize = 11f
-                    setTextColor(0xFFE0DEEB.toInt())
-                    gravity = Gravity.CENTER_VERTICAL
-                    setPadding(dp(10), 0, dp(10), 0)
-                    background = GradientDrawable().apply {
-                        cornerRadius = dp(8).toFloat()
-                        setColor(0xFF484650.toInt())
-                    }
-                }, FrameLayout.LayoutParams(LP_MATCH, dp(36), Gravity.BOTTOM))
-            }
-            mock.addView(TextView(this).apply {
-                text = "MIC"
-                textSize = 10f
-                gravity = Gravity.CENTER
-                setTypeface(typeface, Typeface.BOLD)
-                setTextColor(Color.WHITE)
-                background = GradientDrawable().apply {
-                    shape = GradientDrawable.OVAL
-                    setColor(0xFF292830.toInt())
-                    setStroke(dp(2), 0xFFE96C78.toInt())
-                }
-                contentDescription = "Illustration of the microphone position"
-            }, FrameLayout.LayoutParams(dp(42), dp(42), Gravity.END or Gravity.BOTTOM).apply {
-                marginEnd = if (micOverKeyboard) dp(66) else dp(16)
-                bottomMargin = if (!keyboardOpen) dp(16) else if (micOverKeyboard) dp(24) else dp(40)
-            })
-            content.addView(mock)
-        }
-        example(
-            "Position 1 — keyboard opened",
-            "The idle microphone near Gboard's toolbar, as in your first example.",
-            keyboardOpen = true, micOverKeyboard = true
-        )
-        example(
-            "Position 2 — keyboard closed, actively dictating",
-            "The microphone floats over the app only while recording.",
-            keyboardOpen = false, micOverKeyboard = false
-        )
-        example(
-            "Position 3 — keyboard open, actively dictating",
-            "A separate microphone location when you record with Gboard visible.",
-            keyboardOpen = true, micOverKeyboard = false
-        )
-        android.app.AlertDialog.Builder(this)
-            .setTitle("Where the microphone goes")
-            .setView(scrollableDialogContent(content))
-            .setPositiveButton("Done", null)
-            .show()
-    }
-
     /** Guided real-keyboard placement; the overlay remains above this dialog.
      * Calibration state is temporary, and V4's saved coordinates are preserved. */
     private fun promptPlacementCalibration(
