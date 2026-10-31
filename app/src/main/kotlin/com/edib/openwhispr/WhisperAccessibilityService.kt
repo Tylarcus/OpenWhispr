@@ -993,7 +993,7 @@ class WhisperAccessibilityService : AccessibilityService() {
                 y = (cy - windowSize / 2).toInt()
             }
             val circleView = TextView(this).apply {
-                text = "✕\\nClose"
+                text = "✕\nClose"
                 gravity = Gravity.CENTER
                 textSize = 13f
                 setTextColor(Color.WHITE)
