@@ -184,19 +184,19 @@ class WhisperAccessibilityService : AccessibilityService() {
                 AccessibilityEvent.TYPE_VIEW_CLICKED -> {
                     updateEditorLayoutFromEvent(event)
                     refreshAccessibilityFocusSignal()
-                    if (prefs().getBoolean("suggestions_dock_enabled", false)) {
+                    if (prefs().getBoolean("suggestions_dock_enabled", true)) {
                         if (event.eventType == AccessibilityEvent.TYPE_VIEW_FOCUSED)
                             onEditorFocusChanged(event)
                         checkSuggestionStripOnWindowEvent()
                     }
                 }
                 AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED -> {
-                    if (prefs().getBoolean("suggestions_dock_enabled", false))
+                    if (prefs().getBoolean("suggestions_dock_enabled", true))
                         checkSuggestionStripOnWindowEvent()
                 }
                 AccessibilityEvent.TYPE_VIEW_TEXT_CHANGED -> {
                     updateEditorLayoutFromEvent(event)
-                    if (prefs().getBoolean("suggestions_dock_enabled", false))
+                    if (prefs().getBoolean("suggestions_dock_enabled", true))
                         onTextFieldChanged(event)
                 }
             }
@@ -345,7 +345,7 @@ class WhisperAccessibilityService : AccessibilityService() {
                     lastFocusedEditorScanUptimeMs = now
                     refreshFocusedEditorLayout()
                 }
-                if (prefs().getBoolean("suggestions_dock_enabled", false) &&
+                if (prefs().getBoolean("suggestions_dock_enabled", true) &&
                     suggestionState.shouldUseAlternativePosition &&
                     now - lastSuggestionScanUptimeMs >= 750L) {
                     checkSuggestionStripOnWindowEvent()
@@ -612,17 +612,17 @@ class WhisperAccessibilityService : AccessibilityService() {
     // Finishing recording immediately restores position 1 (no timer).
     private fun currentMode(): MicrophoneMode = MicrophoneModeResolver.resolve(
         keyboardVisibleNow(), state == State.RECORDING,
-        prefs().getBoolean("recording_dock_enabled", false),
+        prefs().getBoolean("recording_dock_enabled", true),
         positionCalibrationMode,
         suggestionsBusy = activeKeyboardLayout == KeyboardLayoutProfile.TEXT &&
             suggestionState.shouldUseAlternativePosition &&
             !suppressSuggestionsUntilRealEdit,
-        suggestionsDockEnabled = prefs().getBoolean("suggestions_dock_enabled", false),
+        suggestionsDockEnabled = prefs().getBoolean("suggestions_dock_enabled", true),
         typingAction = typingAction()
     )
 
     private fun typingAction(): TypingAction = TypingAction.fromPreference(
-        prefs().getString("typing_action", "position3")
+        prefs().getString("typing_action", "hide")
     )
 
     private fun hiddenDueToTyping(): Boolean =
@@ -632,7 +632,7 @@ class WhisperAccessibilityService : AccessibilityService() {
                 suggestionsBusy = activeKeyboardLayout == KeyboardLayoutProfile.TEXT &&
                     suggestionState.shouldUseAlternativePosition &&
                     !suppressSuggestionsUntilRealEdit,
-                suggestionsDockEnabled = prefs().getBoolean("suggestions_dock_enabled", false),
+                suggestionsDockEnabled = prefs().getBoolean("suggestions_dock_enabled", true),
                 typingAction = typingAction()
             )
 
@@ -681,14 +681,28 @@ class WhisperAccessibilityService : AccessibilityService() {
     }
 
     private fun positionForMode(mode: MicrophoneMode, size: Int): BubbleSize.Position {
-        val defaultX = when (mode) {
+        // An explicit link uses the actual saved position 1 coordinates.
+        // Numeric positions that are configured separately stay independent.
+        // Calibration previews always use the chosen mode's own saved coordinates.
+        val linkNumber = when (mode) {
+            MicrophoneMode.KEYBOARD -> null
+            MicrophoneMode.FLOATING -> 2
+            MicrophoneMode.RECORDING_DOCK -> 3
+            MicrophoneMode.TYPING_DOCK -> 4
+        }
+        val useLinkedHome = linkNumber != null &&
+            positionCalibrationMode != mode &&
+            !(activePositionProfile() == KeyboardLayoutProfile.NUMBER && separateNumericPositions()) &&
+            prefs().getBoolean("position_${linkNumber}_same_as_1", false)
+        val homeMode = if (useLinkedHome) MicrophoneMode.KEYBOARD else mode
+        val defaultX = when (homeMode) {
             MicrophoneMode.KEYBOARD -> ((screenW - (DOCK_RIGHT_DP * dp).toInt() - size).toFloat() /
                 (screenW - size).coerceAtLeast(1)).coerceIn(0f, 1f)
             MicrophoneMode.FLOATING -> 0.85f
             MicrophoneMode.RECORDING_DOCK -> 0.05f
             MicrophoneMode.TYPING_DOCK -> 0.04f
         }
-        val defaultY = when (mode) {
+        val defaultY = when (homeMode) {
             MicrophoneMode.KEYBOARD -> {
                 val target = keyboardTopPx() + (DOCK_TOP_DP * dp).toInt()
                 (target.toFloat() / (screenH - size).coerceAtLeast(1)).coerceIn(0f, 1f)
@@ -697,10 +711,10 @@ class WhisperAccessibilityService : AccessibilityService() {
             MicrophoneMode.RECORDING_DOCK -> 0.46f
             MicrophoneMode.TYPING_DOCK -> 0.35f
         }
-        val currentX = posKey(mode, "x")
-        val currentY = posKey(mode, "y")
-        val fallbackX = posKey(mode, "x", KeyboardLayoutProfile.TEXT)
-        val fallbackY = posKey(mode, "y", KeyboardLayoutProfile.TEXT)
+        val currentX = posKey(homeMode, "x")
+        val currentY = posKey(homeMode, "y")
+        val fallbackX = posKey(homeMode, "x", KeyboardLayoutProfile.TEXT)
+        val fallbackY = posKey(homeMode, "y", KeyboardLayoutProfile.TEXT)
         // If no custom number layout spot has been chosen, use the normal
         // text location rather than unexpectedly resetting to a corner.
         val x = prefs().getFloat(currentX, prefs().getFloat(fallbackX, defaultX))
@@ -940,7 +954,7 @@ class WhisperAccessibilityService : AccessibilityService() {
 
     private fun currentBubbleSizePercent(): Int = BubbleSize.preferencePercent(
         try {
-            prefs().getInt(BubbleSize.PREFERENCE_KEY, BubbleSize.DEFAULT_PERCENT)
+            prefs().getInt(BubbleSize.PREFERENCE_KEY, BubbleSize.STARTUP_PERCENT)
         } catch (_: ClassCastException) {
             null
         }
@@ -1091,7 +1105,7 @@ class WhisperAccessibilityService : AccessibilityService() {
             when (ev.action) {
                 MotionEvent.ACTION_DOWN -> {
                     dragAllowedForGesture = positionCalibrationMode != null ||
-                        !prefs().getBoolean("positions_locked", false)
+                        !prefs().getBoolean("positions_locked", true)
                     isDraggingOverlay = true
                     gestureStartedWithKeyboard = keyboardVisibleNow()
                     gestureStartedMode = currentMode()
@@ -1328,7 +1342,7 @@ class WhisperAccessibilityService : AccessibilityService() {
 
         // [privacy] In local mode, don't start recording if there's no local
         // model to transcribe with -- tell the user before they speak.
-        if (prefs().getBoolean("use_local", true) && localTranscriber == null) {
+        if (prefs().getBoolean("use_local", false) && localTranscriber == null) {
             toast(localUnavailableMessage()); return
         }
 
@@ -1389,7 +1403,7 @@ class WhisperAccessibilityService : AccessibilityService() {
 
         if (pcm.isEmpty() || peakAmplitude(pcm) < SILENCE_PEAK) { reset(getString(R.string.no_audio_captured)); return }
 
-        val useLocal = prefs().getBoolean("use_local", true)
+        val useLocal = prefs().getBoolean("use_local", false)
         val local = localTranscriber
 
         // [privacy] Local mode never falls back to the cloud: previously a
@@ -1509,7 +1523,7 @@ class WhisperAccessibilityService : AccessibilityService() {
             }
         }
 
-        val usePostProcessing = prefs().getBoolean("use_post_processing", false)
+        val usePostProcessing = prefs().getBoolean("use_post_processing", true)
         val cleanupConfig = CleanupProviderConfig.fromPreferences(
             prefs().getString("cleanup_provider", null),
             prefs().getString("cleanup_base_url", null),
