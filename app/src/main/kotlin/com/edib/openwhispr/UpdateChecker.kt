@@ -206,6 +206,7 @@ object UpdateChecker {
         context: Context,
         apkUrl: String,
         expectedSha256: String?,
+        onProgress: (Long, Long) -> Unit = { _, _ -> },
         callback: (File?, String?) -> Unit
     ) {
         val request = Request.Builder().url(apkUrl).build()
@@ -228,10 +229,30 @@ object UpdateChecker {
                     val dir = File(context.cacheDir, "updates").apply { mkdirs() }
                     val file = File(dir, "openwhispr-update.apk")
                     // [security] Hash while copying (no second pass over the file).
+                    // Report real bytes downloaded rather than leaving the user
+                    // with a toast that disappears during a large APK download.
+                    val totalBytes = body.contentLength()
+                    var readBytes = 0L
+                    var lastUpdate = 0L
                     val digest = MessageDigest.getInstance("SHA-256")
                     DigestInputStream(body.byteStream(), digest).use { input ->
-                        file.outputStream().use { output -> input.copyTo(output) }
+                        file.outputStream().use { output ->
+                            val buffer = ByteArray(32 * 1024)
+                            while (true) {
+                                val count = input.read(buffer)
+                                if (count < 0) break
+                                output.write(buffer, 0, count)
+                                readBytes += count
+                                val now = System.nanoTime()
+                                if (now - lastUpdate > 120_000_000L ||
+                                    (totalBytes > 0 && readBytes >= totalBytes)) {
+                                    onProgress(readBytes, totalBytes)
+                                    lastUpdate = now
+                                }
+                            }
+                        }
                     }
+                    onProgress(readBytes, totalBytes)
                     val actualSha256 = digest.digest().joinToString("") { "%02x".format(it) }
                     if (!checksumMatches(expectedSha256, actualSha256)) {
                         file.delete()
