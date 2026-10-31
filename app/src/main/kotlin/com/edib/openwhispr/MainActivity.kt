@@ -2056,7 +2056,7 @@ class MainActivity : AppCompatActivity() {
                         setImageBitmap(android.graphics.BitmapFactory.decodeStream(stream))
                     }
                 } catch (e: Exception) {
-                    Log.w("OpenWhispr", "Position example asset missing: $assetName", e)
+                    android.util.Log.w("OpenWhispr", "Position example asset missing: $assetName", e)
                     setImageResource(android.R.drawable.ic_dialog_alert)
                 }
             }
