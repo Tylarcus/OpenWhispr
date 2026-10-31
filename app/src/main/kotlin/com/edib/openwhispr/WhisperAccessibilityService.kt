@@ -104,7 +104,8 @@ class WhisperAccessibilityService : AccessibilityService() {
     private var ignoreOwnEditsUntilMs = 0L
     private var suppressSuggestionsUntilRealEdit = false
     private var clipboardOnlySession = false
-    private var dismissTargetView: TextView? = null
+    private var dismissTargetView: FrameLayout? = null
+    private var dismissTargetCircle: TextView? = null
     private var dismissTargetParams: WindowManager.LayoutParams? = null
     private var previousKeyboardVisible = false
     private var isInsideDismissZone = false
@@ -975,28 +976,40 @@ class WhisperAccessibilityService : AccessibilityService() {
         if (dismissTargetView != null || positionCalibrationMode != null) return
         try {
             val wm = getSystemService(WINDOW_SERVICE) as WindowManager
-            val size = (76 * dp).toInt()
+            // Provide transparent breathing room around the 76dp circle.
+            // Hover growth to ~88dp now stays inside this 100dp overlay window.
+            val windowSize = (100 * dp).toInt()
+            val circleSize = (76 * dp).toInt()
             val (cx, cy) = dismissZoneCenter()
             val params = WindowManager.LayoutParams(
-                size, size,
+                windowSize, windowSize,
                 WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
                 WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
                     WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE,
                 PixelFormat.TRANSLUCENT
             ).apply {
                 gravity = Gravity.TOP or Gravity.START
-                x = (cx - size / 2).toInt()
-                y = (cy - size / 2).toInt()
+                x = (cx - windowSize / 2).toInt()
+                y = (cy - windowSize / 2).toInt()
             }
-            val target = TextView(this).apply {
-                text = "✕\nClose"
+            val circleView = TextView(this).apply {
+                text = "✕\\nClose"
                 gravity = Gravity.CENTER
                 textSize = 13f
                 setTextColor(Color.WHITE)
                 background = circle(0xEE782828.toInt(), 0xFFFFB4B4.toInt(), (2 * dp).toInt())
             }
-            wm.addView(target, params)
-            dismissTargetView = target
+            val window = FrameLayout(this).apply {
+                clipChildren = false
+                clipToPadding = false
+                addView(circleView, FrameLayout.LayoutParams(
+                    circleSize, circleSize, Gravity.CENTER
+                ))
+                alpha = 0.62f
+            }
+            wm.addView(window, params)
+            dismissTargetView = window
+            dismissTargetCircle = circleView
             dismissTargetParams = params
         } catch (e: Exception) {
             Log.w(TAG, "Dismiss target could not be displayed", e)
@@ -1009,17 +1022,18 @@ class WhisperAccessibilityService : AccessibilityService() {
         val inside = isDismissZone(rawX, rawY)
         if (inside == isInsideDismissZone) return
         isInsideDismissZone = inside
-        // Do not scale this View beyond its TYPE_ACCESSIBILITY_OVERLAY window.
-        // The old 1.16x hover scale was clipped by Android's fixed 76dp window,
-        // causing the red circular target to show flattened/cut-off edges.
-        // Alpha still confirms when the microphone reaches the Close zone.
         target.alpha = if (inside) 1f else 0.62f
+        dismissTargetCircle?.apply {
+            scaleX = if (inside) 1.14f else 1f
+            scaleY = if (inside) 1.14f else 1f
+        }
     }
 
     private fun removeDismissTarget() {
         isInsideDismissZone = false
         val target = dismissTargetView ?: return
         dismissTargetView = null
+        dismissTargetCircle = null
         dismissTargetParams = null
         try {
             (getSystemService(WINDOW_SERVICE) as WindowManager).removeView(target)
@@ -1544,7 +1558,8 @@ class WhisperAccessibilityService : AccessibilityService() {
                 return
             }
 
-            val customInstructions = prefs().getString("custom_instructions", "") ?: ""
+            UserPromptPreset.migrateIfNeeded(prefs())
+            val customInstructions = UserPromptPreset.combinedInstructions(prefs())
             val vocabulary = Dictionary.load(prefs())
             val prompt = PostProcessor.effectivePrompt(customInstructions, vocabulary)
 
