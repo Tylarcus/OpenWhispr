@@ -1791,7 +1791,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun currentBubbleSizePercent(): Int {
         val storedValue = try {
-            prefs().getInt(BubbleSize.PREFERENCE_KEY, BubbleSize.DEFAULT_PERCENT)
+            prefs().getInt(BubbleSize.PREFERENCE_KEY, BubbleSize.STARTUP_PERCENT)
         } catch (_: ClassCastException) {
             null
         }
