@@ -1296,11 +1296,47 @@ class MainActivity : AppCompatActivity() {
             return
         }
 
-        toast(getString(R.string.downloading_update))
-        // [security] Pass GitHub's published checksum; downloadApk only
-        // returns a file if it matches.
-        UpdateChecker.downloadApk(this, apkUrl, info.apkSha256) { file, error ->
+        val progressBar = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal).apply {
+            isIndeterminate = true
+            max = 100
+        }
+        val progressText = TextView(this).apply {
+            text = "Connecting to GitHub…"
+            textSize = 14f
+            setPadding(0, dp(14), 0, dp(4))
+        }
+        val progressView = vertical(dp(16), dp(20)).apply {
+            addView(progressBar, LinearLayout.LayoutParams(LP_MATCH, dp(8)))
+            addView(progressText)
+        }
+        val progressDialog = android.app.AlertDialog.Builder(this)
+            .setTitle("Downloading OpenWhispr")
+            .setView(progressView)
+            .setCancelable(false)
+            .create()
+        progressDialog.show()
+        // The APK is downloaded to private cache, SHA-256 checked, and then
+        // handed to Android's system installer. Progress is real byte counts.
+        UpdateChecker.downloadApk(this, apkUrl, info.apkSha256, onProgress = { bytes, total ->
             runOnUiThread {
+                if (!isFinishing && !isDestroyed && progressDialog.isShowing) {
+                    if (total > 0) {
+                        progressBar.isIndeterminate = false
+                        progressBar.progress = ((bytes * 100L) / total).toInt().coerceIn(0, 100)
+                        progressText.text = if (bytes >= total)
+                            "Download complete. Verifying file…"
+                        else "Downloaded ${"%.1f".format(bytes / 1048576.0)} of " +
+                            "${"%.1f".format(total / 1048576.0)} MB (" +
+                            "${((bytes * 100L) / total).toInt()}%)"
+                    } else {
+                        progressBar.isIndeterminate = true
+                        progressText.text = "Downloaded ${"%.1f".format(bytes / 1048576.0)} MB"
+                    }
+                }
+            }
+        }) { file, error ->
+            runOnUiThread {
+                progressDialog.dismiss()
                 if (isFinishing || isDestroyed) return@runOnUiThread
                 if (file == null) {
                     // [security] A failed download or failed checksum both end
