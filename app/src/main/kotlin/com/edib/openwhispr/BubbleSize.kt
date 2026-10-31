@@ -5,7 +5,8 @@ import kotlin.math.roundToInt
 object BubbleSize {
     const val PREFERENCE_KEY = "bubble_size_percent"
     const val MIN_PERCENT = 5
-    const val DEFAULT_PERCENT = 100
+    const val DEFAULT_PERCENT = 100 // Relative scale: 100% is the original design size.
+    const val STARTUP_PERCENT = 77 // Personal fork preferred initial size.
     const val MAX_PERCENT = 1000
     const val STEP_PERCENT = 1
 
