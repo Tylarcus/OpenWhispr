@@ -196,6 +196,14 @@ class PostProcessorTest {
     }
 
     @Test
+    fun previouslySavedVerbatimFormatterIsNotDoubled() {
+        val oldCustom = "You are an intelligent speech transcription formatter, NOT a writing editor.\\n" +
+            "Preserve my original words.\\nPARAGRAPH STYLE: Format conversational dictation into short paragraphs."
+        val prompt = PostProcessor.effectivePrompt(oldCustom)
+        assertFalse(prompt.contains("Additional user-specified refinements"))
+    }
+
+    @Test
     fun stockPromptIsNotDuplicatedWhenAlreadySavedAsCustomInstructions() {
         val prompt = PostProcessor.effectivePrompt(PostProcessor.DEFAULT_PROMPT)
         assertEquals(1, Regex("PARAGRAPH STYLE:").findAll(prompt).count())
