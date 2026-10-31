@@ -1,6 +1,10 @@
-name: Android PR checks
+name: Android code checks
 
 on:
+  push:
+    branches:
+      - 'fix/**'
+      - 'feature/**'
   pull_request:
     branches: [main]
   workflow_dispatch:
