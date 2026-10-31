@@ -1687,7 +1687,7 @@ class MainActivity : AppCompatActivity() {
             setHorizontallyScrolling(false)
             gravity = Gravity.TOP or Gravity.START
             setText(UserPromptPreset.presetText(prefs()))
-            setSelection(text.length)
+            setSelection(0)
         }
         val extraInput = EditText(this).apply {
             hint = "Optional additional instructions (names, tone, formatting, etc.)"
@@ -1698,7 +1698,10 @@ class MainActivity : AppCompatActivity() {
             gravity = Gravity.TOP or Gravity.START
             setText(prefs().getString(UserPromptPreset.EXTRA_KEY, ""))
         }
-        val panel = vertical(0, dp(8))
+        val panel = vertical(0, dp(8)).apply {
+            isFocusableInTouchMode = true
+            requestFocus() // Keep the editor at the top instead of jumping to the end of the long preset.
+        }
         panel.addView(TextView(this).apply {
             text = "OpenWispr's original cleanup rules remain unchanged. The editable " +
                 "preset and your extra instructions are appended to those rules " +
