@@ -507,12 +507,21 @@ class MainActivity : AppCompatActivity() {
                 setMargins(dp(24), 0, dp(24), 0)
             }
         }
+        val positionLinkSwitches = mutableMapOf<Int, MaterialSwitch>()
+        fun saveSecondaryPosition(number: Int) {
+            // An explicit calibration means the user wants this independent home.
+            prefs().edit().putBoolean("position_${number}_same_as_1", false).apply()
+            positionLinkSwitches[number]?.isChecked = false
+            markLocked()
+            WhisperAccessibilityService.instance?.refreshPositionPreferences()
+        }
         fun sameAsPositionOneRow(number: Int): LinearLayout {
             val key = "position_${number}_same_as_1"
             val toggle = MaterialSwitch(this).apply {
                 isChecked = prefs().getBoolean(key, false)
                 isClickable = false
             }
+            positionLinkSwitches[number] = toggle
             return settingsRow(
                 "Same as position 1",
                 "Follow position 1 automatically. Turn off to use a separately saved position.",
@@ -546,7 +555,7 @@ class MainActivity : AppCompatActivity() {
             addView(settingsRow(
                 "Set position 2",
                 "Choose where the floating mic appears while recording without Gboard."
-            ) { promptPlacementCalibration(MicrophoneMode.FLOATING, markLocked) })
+            ) { promptPlacementCalibration(MicrophoneMode.FLOATING, { saveSecondaryPosition(2) }) })
             addView(positionDivider())
             addView(sameAsPositionOneRow(2))
         })
@@ -564,7 +573,7 @@ class MainActivity : AppCompatActivity() {
             addView(settingsRow(
                 "Set position 3",
                 "Open the test keyboard and place the mic for active dictation."
-            ) { promptPlacementCalibration(MicrophoneMode.RECORDING_DOCK, markLocked) })
+            ) { promptPlacementCalibration(MicrophoneMode.RECORDING_DOCK, { saveSecondaryPosition(3) }) })
             addView(positionDivider())
             addView(sameAsPositionOneRow(3))
             addView(positionDivider())
@@ -627,7 +636,7 @@ class MainActivity : AppCompatActivity() {
             addView(settingsRow(
                 "Set position 4",
                 "Choose a separate location only if you want the mic visible while typing."
-            ) { promptPlacementCalibration(MicrophoneMode.TYPING_DOCK, markLocked) })
+            ) { promptPlacementCalibration(MicrophoneMode.TYPING_DOCK, { saveSecondaryPosition(4) }) })
             addView(positionDivider())
             addView(sameAsPositionOneRow(4))
             addView(positionDivider())
