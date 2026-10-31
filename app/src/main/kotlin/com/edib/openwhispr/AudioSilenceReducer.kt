@@ -52,6 +52,44 @@ object AudioSilenceReducer {
         // A few isolated loud frames are commonly handling noise or clicks,
         // not speech. Do not send a near-silent recording to Whisper based on
         // one 20ms spike (the old global-peak test allowed exactly that).
+        // Compare frame energy with the quieter background frames. Whisper
+        // frequently hallucinates if a microphone records constant room noise
+        // with no voice. An isolated tap/click or even constant fan noise must
+        // not be treated as intelligible speech.
+        val frameMeanAbs = FloatArray(frames)
+        for (f in 0 until frames) {
+            val begin = f * FRAME_BYTES
+            val end = minOf(begin + FRAME_BYTES, pcm.size)
+            var sum = 0L
+            var count = 0
+            var pos = begin
+            while (pos + 1 < end) {
+                val value = ((pcm[pos + 1].toInt() shl 8) or
+                    (pcm[pos].toInt() and 0xFF)).toShort().toInt()
+                sum += abs(value)
+                count++
+                pos += 2
+            }
+            frameMeanAbs[f] = if (count > 0) sum.toFloat() / count else 0f
+        }
+        val sortedEnergy = frameMeanAbs.sorted()
+        val noiseFloor = sortedEnergy[(sortedEnergy.size / 5).coerceAtMost(sortedEnergy.lastIndex)]
+        val speechThreshold = maxOf(210f, noiseFloor * 2.5f)
+        val loudFrameCount = frameMeanAbs.count { it >= speechThreshold }
+        val denseWindow = frameMeanAbs.indices.any { start ->
+            // At least 160ms of high-energy frames in an 800ms window.
+            var count = 0
+            for (j in start until minOf(start + 40, frames)) {
+                if (frameMeanAbs[j] >= speechThreshold) count++
+            }
+            count >= 8
+        }
+        val shortSpeechOnly = frames <= 60 &&
+            frameMeanAbs.average() >= 430.0 && active.count { it } >= 8
+        if (!(denseWindow && loudFrameCount >= 8) && !shortSpeechOnly) {
+            return Result(ByteArray(0), false, pcm.size * 1000 / (SAMPLE_RATE * 2))
+        }
+
         if (active.count { it } < 4) {
             return Result(ByteArray(0), false, pcm.size * 1000 / (SAMPLE_RATE * 2))
         }
