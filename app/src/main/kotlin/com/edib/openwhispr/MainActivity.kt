@@ -462,6 +462,12 @@ class MainActivity : AppCompatActivity() {
             setPadding(dp(24), dp(4), dp(24), dp(12))
             setTextColor(attrColor(android.R.attr.textColorSecondary))
         })
+        settingsContainer.addView(group().apply {
+            addView(settingsRow(
+                "See real position examples",
+                "Three cropped phone screenshots showing where the microphone goes."
+            ) { showPositionPhotoExamples() })
+        })
         val positionsLockedSwitch = MaterialSwitch(this).apply {
             isChecked = prefs().getBoolean("positions_locked", true)
             isClickable = false
@@ -2011,6 +2017,62 @@ class MainActivity : AppCompatActivity() {
         larger = getString(R.string.bubble_larger_accessibility),
         percentUnit = getString(R.string.percent_unit),
     )
+    /** Real cropped screenshots supplied for this fork, stored offline in assets.
+     * Labels follow the actual position modes: idle keyboard, closed recording,
+     * and open recording. No generated mock screenshots. */
+    private fun showPositionPhotoExamples() {
+        val examples = listOf(
+            Triple("Position 1 · Keyboard open, not dictating",
+                "position_guide/position_1_keyboard_open_idle.webp",
+                "The microphone sits beside Gboard's microphone while idle."),
+            Triple("Position 2 · Keyboard closed, actively dictating",
+                "position_guide/position_2_keyboard_closed_dictating.webp",
+                "The microphone floats over the app only while recording."),
+            Triple("Position 3 · Keyboard open, actively dictating",
+                "position_guide/position_3_keyboard_open_dictating.webp",
+                "The microphone uses its recording position with Gboard visible.")
+        )
+        val content = vertical(0, dp(10))
+        examples.forEach { (title, assetName, description) ->
+            content.addView(TextView(this).apply {
+                text = title
+                textSize = 16f
+                setTypeface(typeface, Typeface.BOLD)
+                setTextColor(attrColor(android.R.attr.textColorPrimary))
+                setPadding(0, dp(14), 0, dp(4))
+            })
+            content.addView(TextView(this).apply {
+                text = description
+                textSize = 13f
+                setTextColor(attrColor(android.R.attr.textColorSecondary))
+                setPadding(0, 0, 0, dp(8))
+            })
+            val screenshot = ImageView(this).apply {
+                scaleType = ImageView.ScaleType.FIT_CENTER
+                adjustViewBounds = true
+                contentDescription = title
+                try {
+                    assets.open(assetName).use { stream ->
+                        setImageBitmap(android.graphics.BitmapFactory.decodeStream(stream))
+                    }
+                } catch (e: Exception) {
+                    Log.w("OpenWhispr", "Position example asset missing: $assetName", e)
+                    setImageResource(android.R.drawable.ic_dialog_alert)
+                }
+            }
+            content.addView(screenshot, LinearLayout.LayoutParams(LP_MATCH, dp(260)))
+        }
+        val dialog = android.app.AlertDialog.Builder(this)
+            .setTitle("Microphone position examples")
+            .setView(scrollableDialogContent(content))
+            .setPositiveButton("Done", null)
+            .create()
+        dialog.show()
+        dialog.window?.setLayout(
+            (resources.displayMetrics.widthPixels * 0.92f).toInt(), LP_WRAP
+        )
+    }
+
     /** Guided real-keyboard placement; the overlay remains above this dialog.
      * Calibration state is temporary, and V4's saved coordinates are preserved. */
     private fun promptPlacementCalibration(
