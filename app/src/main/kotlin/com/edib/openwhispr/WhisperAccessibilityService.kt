@@ -1419,6 +1419,20 @@ class WhisperAccessibilityService : AccessibilityService() {
 
         if (pcm.isEmpty() || peakAmplitude(pcm) < SILENCE_PEAK) { reset(getString(R.string.no_audio_captured)); return }
 
+        // Compress only long near-silent stretches. The user can pause for
+        // 20 seconds and resume; speech on BOTH sides remains in order.
+        // The earlier global peak check alone let full-length silent sections
+        // reach Whisper, which can invent phrases such as "Thank you".
+        val reduced = AudioSilenceReducer.reduce(pcm)
+        if (!reduced.hasActivity || reduced.pcm.isEmpty()) {
+            reset(getString(R.string.no_audio_captured))
+            return
+        }
+        if (reduced.removedMilliseconds > 0) {
+            Log.i(TAG, "Removed ${reduced.removedMilliseconds} ms of quiet audio before ASR")
+        }
+        val cleanedPcm = reduced.pcm
+
         val useLocal = prefs().getBoolean("use_local", false)
         val local = localTranscriber
 
@@ -1426,11 +1440,11 @@ class WhisperAccessibilityService : AccessibilityService() {
         // missing/unloaded model sent the recording to Groq without notice.
         // Now the audio is discarded and the user is told why.
         if (useLocal && local != null) {
-            transcribeLocal(pcm, local)
+            transcribeLocal(cleanedPcm, local)
         } else if (useLocal) {
             reset(localUnavailableMessage())
         } else {
-            transcribeApi(pcm)
+            transcribeApi(cleanedPcm)
         }
     }
 
