@@ -17,7 +17,22 @@ object TranscriberClient {
     fun parseResponse(json: String): Result = try {
         val obj = JSONObject(json)
         when {
-            obj.has("text") -> Result(obj.getString("text"), null)
+            obj.has("text") -> {
+                // Groq verbose_json exposes Whisper's no-speech confidence.
+                // Suppress hallucinated phrases only when EVERY segment is
+                // overwhelmingly likely to be silence. A real segment wins.
+                val segments = obj.optJSONArray("segments")
+                val likelySilence = segments != null && segments.length() > 0 &&
+                    (0 until segments.length()).all { idx ->
+                        val segment = segments.optJSONObject(idx)
+                        segment != null &&
+                            segment.has("no_speech_prob") &&
+                            segment.optDouble("no_speech_prob", 0.0) >= 0.85 &&
+                            segment.optDouble("avg_logprob", 0.0) < -0.35
+                    }
+                if (likelySilence) Result("", null)
+                else Result(obj.getString("text"), null)
+            }
             obj.has("error") -> Result(null, obj.getJSONObject("error").getString("message"))
             else -> Result(null, "Unknown response")
         }
@@ -64,6 +79,7 @@ object TranscriberClient {
         val multipart = MultipartBody.Builder()
             .setType(MultipartBody.FORM)
             .addFormDataPart("model", TRANSCRIPTION_MODEL)
+            .addFormDataPart("response_format", "verbose_json")
             .addFormDataPart("file", "audio.wav", wavData.toRequestBody("audio/wav".toMediaType()))
         languages.singleOrNull()?.let { multipart.addFormDataPart("language", it) }
         listOfNotNull(languageHint(languages), dictionaryPrompt(vocabulary).takeIf(String::isNotEmpty))
