@@ -11,6 +11,21 @@ class TranscriberClientTest {
         assertNull(r.error)
     }
 
+    @Test fun `discards transcription with strong silence metadata`() {
+        val raw = """{"text":"Tyskland, Tyskland",
+           "segments":[{"text":"Tyskland","no_speech_prob":0.98,"avg_logprob":-1.5}]}"""
+        val result = TranscriberClient.parseResponse(raw)
+        assertEquals("", result.text)
+    }
+
+    @Test fun `keeps real speech even if some segments are silent`() {
+        val raw = """{"text":"Hi I like granola bars.",
+           "segments":[{"text":"Hi I like granola bars","no_speech_prob":0.03,"avg_logprob":-0.2},
+           {"text":"","no_speech_prob":0.97,"avg_logprob":-1.2}]}"""
+        val result = TranscriberClient.parseResponse(raw)
+        assertEquals("Hi I like granola bars.", result.text)
+    }
+
     @Test fun `parses error response`() {
         val r = TranscriberClient.parseResponse("""{"error":{"message":"Invalid key","type":"auth"}}""")
         assertNull(r.text)
@@ -37,6 +52,7 @@ class TranscriberClientTest {
         )
         val multipart = request.body as okhttp3.MultipartBody
         val parts = multipart.parts
+        assertEquals("verbose_json", partContent(parts.first { it.hasDispositionName("response_format") }))
         val model = partContent(parts.first { it.hasDispositionName("model") })
         val prompt = partContent(parts.first { it.hasDispositionName("prompt") })
 
