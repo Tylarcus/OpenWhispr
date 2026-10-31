@@ -65,6 +65,21 @@ class AudioSilenceReducerTest {
         assertTrue(result.pcm.isEmpty())
     }
 
+    @Test fun continuousRoomNoiseDoesNotBecomeSpeech() {
+        val input = frame(450, 18000)
+        val reduced = AudioSilenceReducer.reduce(input)
+        assertFalse(reduced.hasActivity)
+        assertTrue(reduced.pcm.isEmpty())
+    }
+
+    @Test fun speechOverQuietRoomNoiseSurvivesAndLongPauseIsRemoved() {
+        val input = concat(frame(80, 300), frame(1500, 500),
+            frame(80, 20000), frame(1300, 400))
+        val reduced = AudioSilenceReducer.reduce(input)
+        assertTrue(reduced.hasActivity)
+        assertTrue(reduced.removedMilliseconds > 18000)
+    }
+
     @Test fun shortQuickUtteranceIsKept() {
         val input = frame(1200, 160)
         val result = AudioSilenceReducer.reduce(input)
