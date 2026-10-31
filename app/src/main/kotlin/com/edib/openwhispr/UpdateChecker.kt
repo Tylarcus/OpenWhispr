@@ -3,6 +3,7 @@ package com.edib.openwhispr
 import android.content.Context
 import android.content.SharedPreferences
 import okhttp3.*
+import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
 import java.io.IOException
@@ -27,8 +28,20 @@ object UpdateChecker {
 
     private val client = OkHttpClient()
     private const val CHECK_INTERVAL_MS = 12 * 60 * 60 * 1000L // don't hammer GitHub on every app open
+    // The personal APKs are tagged gboard-dock-main-N and deliberately marked
+    // as prereleases. GitHub /releases/latest ignores them, so inspect the list.
     private const val RELEASES_URL =
-        "https://api.github.com/repos/EdiBianco/OpenWhispr/releases/latest"
+        "https://api.github.com/repos/Tylarcus/OpenWhispr/releases?per_page=100"
+    private const val DOCK_VERSION_CODE_BASE = 40000L
+    private val DOCK_RELEASE_TAG = Regex("^gboard-dock-main-(\\d+)$")
+
+    data class CheckResult(val update: UpdateInfo?, val error: String? = null)
+
+    fun dockBuildNumber(tag: String): Int? =
+        DOCK_RELEASE_TAG.matchEntire(tag)?.groupValues?.get(1)?.toIntOrNull()
+
+    fun isNewerDockBuild(tag: String, installedVersionCode: Long): Boolean =
+        dockBuildNumber(tag)?.let { DOCK_VERSION_CODE_BASE + it > installedVersionCode } ?: false
 
     // Matches the <!--WHATS_NEW_START-->...<!--WHATS_NEW_END--> block the
     // release workflow wraps around that version's CHANGELOG.md section, so
@@ -69,82 +82,109 @@ object UpdateChecker {
     fun checksumMatches(expectedSha256: String?, actualSha256: String): Boolean =
         expectedSha256 != null && expectedSha256.equals(actualSha256, ignoreCase = true)
 
-    /** Calls back with an [UpdateInfo] if a newer release exists, or null
-     * otherwise. Respects a cache interval so this isn't a network call on
-     * every app open; falls back to the last cached result if the network
-     * check fails. Callback always runs on a background thread. */
+    /** Checks this fork's independently signed main-build releases, including
+     * prereleases. Uses the APK's monotonically increasing versionCode rather
+     * than its constant display version (4.0.0-docktest).
+     * Never mistakes a network failure for "up to date". */
     fun checkForUpdate(
         prefs: SharedPreferences,
-        currentVersion: String,
+        installedVersionCode: Long,
         force: Boolean = false,
-        callback: (UpdateInfo?) -> Unit
+        callback: (CheckResult) -> Unit
     ) {
         val now = System.currentTimeMillis()
-        val lastCheck = prefs.getLong("last_update_check", 0)
-        val cachedVersion = prefs.getString("cached_update_version", null)
-        val cachedUrl = prefs.getString("cached_update_url", null)
-        val cachedApkUrl = prefs.getString("cached_update_apk_url", null)
-        val cachedNotes = prefs.getString("cached_update_notes", null)
-        // [security] Cached with the rest so an offline/cached result can still be verified.
-        val cachedApkSha256 = prefs.getString("cached_update_apk_sha256", null)
+        val lastCheck = prefs.getLong("dock_last_update_check", 0L)
+        val cachedBuild = prefs.getInt("dock_cached_build", -1)
+        val cachedUrl = prefs.getString("dock_cached_url", null)
+        val cachedApkUrl = prefs.getString("dock_cached_apk_url", null)
+        val cachedNotes = prefs.getString("dock_cached_notes", null)
+        val cachedSha = prefs.getString("dock_cached_sha256", null)
 
         fun cachedResult(): UpdateInfo? =
-            if (cachedVersion != null && cachedUrl != null && isNewer(cachedVersion, currentVersion))
-                UpdateInfo(cachedVersion, cachedUrl, cachedApkUrl, cachedNotes, cachedApkSha256)
-            else null
+            if (cachedBuild >= 0 &&
+                DOCK_VERSION_CODE_BASE + cachedBuild > installedVersionCode &&
+                !cachedUrl.isNullOrBlank() && !cachedApkUrl.isNullOrBlank() &&
+                cachedSha != null
+            ) {
+                UpdateInfo("4.0.0-docktest build #$cachedBuild", cachedUrl, cachedApkUrl, cachedNotes, cachedSha)
+            } else null
 
         if (!force && now - lastCheck < CHECK_INTERVAL_MS) {
-            callback(cachedResult())
+            callback(CheckResult(cachedResult()))
             return
         }
 
-        val request = Request.Builder().url(RELEASES_URL).build()
+        val request = Request.Builder()
+            .url(RELEASES_URL)
+            .header("Accept", "application/vnd.github+json")
+            .build()
         client.newCall(request).enqueue(object : Callback {
             override fun onFailure(call: Call, e: IOException) {
-                callback(cachedResult())
+                callback(CheckResult(cachedResult(), "Could not reach GitHub: ${e.message ?: "network error"}"))
             }
 
             override fun onResponse(call: Call, response: Response) {
-                try {
-                    val body = response.body?.string() ?: ""
-                    val obj = JSONObject(body)
-                    val tag = obj.optString("tag_name", "")
-                    val url = obj.optString("html_url", "")
-                    val releaseBody = obj.optString("body", "")
-                    val notes = WHATS_NEW_REGEX.find(releaseBody)
-                        ?.groupValues?.get(1)?.trim()?.takeIf { it.isNotBlank() }
-
-                    var apkUrl: String? = null
-                    var apkSha256: String? = null
-                    val assets = obj.optJSONArray("assets")
-                    if (assets != null) {
-                        for (i in 0 until assets.length()) {
-                            val asset = assets.optJSONObject(i) ?: continue
-                            val name = asset.optString("name", "")
-                            if (name.endsWith(".apk")) {
-                                apkUrl = asset.optString("browser_download_url", null)
-                                // [security] Checksum of this same asset, used by downloadApk.
-                                apkSha256 = parseSha256Digest(asset.optString("digest", null))
+                response.use {
+                    if (!it.isSuccessful) {
+                        callback(CheckResult(cachedResult(), "GitHub update check returned HTTP ${it.code}."))
+                        return
+                    }
+                    try {
+                        val releases = JSONArray(it.body?.string().orEmpty())
+                        var newestBuild = -1
+                        var newestInfo: UpdateInfo? = null
+                        for (i in 0 until releases.length()) {
+                            val release = releases.optJSONObject(i) ?: continue
+                            if (release.optBoolean("draft", false)) continue
+                            val build = dockBuildNumber(release.optString("tag_name", "")) ?: continue
+                            if (build <= newestBuild) continue
+                            val assets = release.optJSONArray("assets") ?: continue
+                            var apkUrl: String? = null
+                            var digest: String? = null
+                            for (j in 0 until assets.length()) {
+                                val asset = assets.optJSONObject(j) ?: continue
+                                if (!asset.optString("name", "").endsWith(".apk")) continue
+                                val sha = parseSha256Digest(asset.optString("digest", null))
+                                val downloadUrl = asset.optString("browser_download_url", "")
+                                if (sha == null || !downloadUrl.startsWith(
+                                        "https://github.com/Tylarcus/OpenWhispr/releases/download/"
+                                    )) continue
+                                apkUrl = downloadUrl
+                                digest = sha
                                 break
                             }
+                            if (apkUrl == null || digest == null) continue
+                            val notesRaw = release.optString("body", "")
+                            val notes = WHATS_NEW_REGEX.find(notesRaw)?.groupValues?.get(1)?.trim()
+                                ?.takeIf { it.isNotBlank() }
+                                ?: notesRaw.take(900).takeIf { it.isNotBlank() }
+                            val url = release.optString("html_url", "")
+                            if (!url.startsWith("https://github.com/Tylarcus/OpenWhispr/releases/tag/")) continue
+                            newestBuild = build
+                            newestInfo = UpdateInfo(
+                                "4.0.0-docktest build #$build", url, apkUrl, notes, digest
+                            )
                         }
-                    }
 
-                    prefs.edit()
-                        .putLong("last_update_check", now)
-                        .putString("cached_update_version", tag)
-                        .putString("cached_update_url", url)
-                        .putString("cached_update_apk_url", apkUrl)
-                        .putString("cached_update_notes", notes)
-                        .putString("cached_update_apk_sha256", apkSha256)
-                        .apply()
-                    if (tag.isNotBlank() && url.isNotBlank() && isNewer(tag, currentVersion)) {
-                        callback(UpdateInfo(tag, url, apkUrl, notes, apkSha256))
-                    } else {
-                        callback(null)
+                        if (newestInfo == null) {
+                            callback(CheckResult(null,
+                                "No verified signed main-branch APK releases were found in this fork."))
+                            return
+                        }
+                        prefs.edit()
+                            .putLong("dock_last_update_check", now)
+                            .putInt("dock_cached_build", newestBuild)
+                            .putString("dock_cached_url", newestInfo.url)
+                            .putString("dock_cached_apk_url", newestInfo.apkUrl)
+                            .putString("dock_cached_notes", newestInfo.notes)
+                            .putString("dock_cached_sha256", newestInfo.apkSha256)
+                            .apply()
+                        callback(CheckResult(if (DOCK_VERSION_CODE_BASE + newestBuild > installedVersionCode)
+                            newestInfo else null))
+                    } catch (e: Exception) {
+                        callback(CheckResult(cachedResult(),
+                            "Couldn't read GitHub releases: ${e.message ?: "invalid response"}"))
                     }
-                } catch (e: Exception) {
-                    callback(cachedResult())
                 }
             }
         })

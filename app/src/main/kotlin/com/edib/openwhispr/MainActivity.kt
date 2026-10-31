@@ -123,11 +123,9 @@ class MainActivity : AppCompatActivity() {
             ActivityCompat.requestPermissions(this, arrayOf(Manifest.permission.POST_NOTIFICATIONS), 2)
         }
 
-        // [privacy] The automatic update check on app open is opt-in (off by
-        // default, including for existing installs), so the app makes no
-        // request to GitHub unless the user enables it or taps "Check for
-        // updates".
-        if (prefs().getBoolean("auto_update_check", false)) checkForUpdate()
+        // Default to checking this fork's signed releases at most every 12 hours.
+        // Existing user choices are preserved, and the switch can turn it off.
+        if (prefs().getBoolean("auto_update_check", true)) checkForUpdate()
 
         val outer = vertical(0, 0)
 
@@ -261,7 +259,7 @@ class MainActivity : AppCompatActivity() {
 
         dictationContainer.addView(sectionHeader(getString(R.string.engine)))
 
-        val isCloud = !prefs().getBoolean("use_local", true)
+        val isCloud = !prefs().getBoolean("use_local", false)
         val cloudSwitch = MaterialSwitch(this).apply {
             isChecked = isCloud
             isClickable = false
@@ -292,7 +290,7 @@ class MainActivity : AppCompatActivity() {
         dictationContainer.addView(sectionHeader(getString(R.string.text_enhancement)))
         val postGroup = group()
 
-        val isPostProcessing = prefs().getBoolean("use_post_processing", false)
+        val isPostProcessing = prefs().getBoolean("use_post_processing", true)
         val postProcessSwitch = MaterialSwitch(this).apply {
             isChecked = isPostProcessing
             isClickable = false
@@ -461,7 +459,7 @@ class MainActivity : AppCompatActivity() {
             setTextColor(attrColor(android.R.attr.textColorSecondary))
         })
         val positionsLockedSwitch = MaterialSwitch(this).apply {
-            isChecked = prefs().getBoolean("positions_locked", false)
+            isChecked = prefs().getBoolean("positions_locked", true)
             isClickable = false
         }
         settingsContainer.addView(group().apply {
@@ -476,6 +474,24 @@ class MainActivity : AppCompatActivity() {
             })
         })
         val markLocked = { positionsLockedSwitch.isChecked = true }
+        // Secondary homes can follow position 1 dynamically or stay independently saved.
+        fun sameAsPositionOneRow(number: Int): LinearLayout {
+            val key = "position_${number}_same_as_1"
+            val toggle = MaterialSwitch(this).apply {
+                isChecked = prefs().getBoolean(key, false)
+                isClickable = false
+            }
+            return settingsRow(
+                "Position $number — same as position 1",
+                "Follow position 1 automatically. Turn off to use its independent saved location.",
+                toggle
+            ) {
+                val linked = !toggle.isChecked
+                toggle.isChecked = linked
+                prefs().edit().putBoolean(key, linked).apply()
+                WhisperAccessibilityService.instance?.refreshPositionPreferences()
+            }
+        }
         settingsContainer.addView(group().apply {
             addView(settingsRow(
                 "Set keyboard-open position",
@@ -485,17 +501,20 @@ class MainActivity : AppCompatActivity() {
                 "Set keyboard-closed position",
                 "Drag a floating preview without needing to start a recording."
             ) { promptPlacementCalibration(MicrophoneMode.FLOATING, markLocked) })
+            addView(sameAsPositionOneRow(2))
             addView(settingsRow(
                 "Set position 3 — recording / suggestions",
                 "Choose where the microphone sits while recording or when selected for typing."
             ) { promptPlacementCalibration(MicrophoneMode.RECORDING_DOCK, markLocked) })
+            addView(sameAsPositionOneRow(3))
             addView(settingsRow(
                 "Set position 4 — typing only",
                 "Optional independent spot while typing, without dictation."
             ) { promptPlacementCalibration(MicrophoneMode.TYPING_DOCK, markLocked) })
+            addView(sameAsPositionOneRow(4))
         })
         val recordingDockSwitch = MaterialSwitch(this).apply {
-            isChecked = prefs().getBoolean("recording_dock_enabled", false)
+            isChecked = prefs().getBoolean("recording_dock_enabled", true)
             isClickable = false
         }
         settingsContainer.addView(group().apply {
@@ -514,7 +533,7 @@ class MainActivity : AppCompatActivity() {
         })
 
         val suggestionsSwitch = MaterialSwitch(this).apply {
-            isChecked = prefs().getBoolean("suggestions_dock_enabled", false)
+            isChecked = prefs().getBoolean("suggestions_dock_enabled", true)
             isClickable = false
         }
         settingsContainer.addView(group().apply {
@@ -539,7 +558,7 @@ class MainActivity : AppCompatActivity() {
         )
         val typingActionValues = arrayOf("hide", "position3", "position4")
         fun typingActionIndex(): Int = typingActionValues.indexOf(
-            prefs().getString("typing_action", "position3")
+            prefs().getString("typing_action", "hide")
         ).coerceAtLeast(0)
         var typingBehaviorRowSubtitle: TextView? = null
         val typingBehaviorRow = settingsRow(
@@ -753,7 +772,7 @@ class MainActivity : AppCompatActivity() {
 
         aboutGroup.addView(settingsRow(getString(R.string.github), getString(R.string.github_summary)) {
             try {
-                startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://github.com/EdiBianco/OpenWhispr")))
+                startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://github.com/Tylarcus/OpenWhispr")))
             } catch (e: Exception) {
                 toast(getString(R.string.open_browser_failed, e.message ?: getString(R.string.unknown_error)))
             }
@@ -763,9 +782,9 @@ class MainActivity : AppCompatActivity() {
             checkForUpdate(force = true)
         })
 
-        // [privacy] Opt-in switch for the automatic check on app open (see onCreate).
+        // Automatic update checks are on by default; users can switch them off.
         val autoUpdateSwitch = MaterialSwitch(this).apply {
-            isChecked = prefs().getBoolean("auto_update_check", false)
+            isChecked = prefs().getBoolean("auto_update_check", true)
             isClickable = false
         }
         // [ui] Subtitle follows the switch state (it used to always say "Off").
@@ -965,8 +984,8 @@ class MainActivity : AppCompatActivity() {
     private fun refresh() {
         val audio = hasPerm(Manifest.permission.RECORD_AUDIO)
         val acc = WhisperAccessibilityService.instance != null
-        val useLocal = prefs().getBoolean("use_local", true)
-        val usePostProcessing = prefs().getBoolean("use_post_processing", false)
+        val useLocal = prefs().getBoolean("use_local", false)
+        val usePostProcessing = prefs().getBoolean("use_post_processing", true)
         val groqApiKey = SecureKeyStorage.groqApiKey(this)
         val cleanupConfig = cleanupProviderConfig()
         val cleanupApiKey = if (cleanupConfig.provider == CleanupProviderConfig.Provider.GROQ)
@@ -1028,7 +1047,7 @@ class MainActivity : AppCompatActivity() {
 
         val customInstructions = prefs().getString("custom_instructions", "") ?: ""
         customInstructionsRowSub.text = if (customInstructions.isBlank())
-            getString(R.string.tap_add_refinements)
+            "Speech-preserving formatting and short paragraphs are enabled. Tap for optional refinements."
         else
             customInstructions.replace("\n", " ")
 
@@ -1119,13 +1138,16 @@ class MainActivity : AppCompatActivity() {
      * [force] bypasses the cache interval and always gives feedback, for
      * the manual "Check for updates" row. */
     private fun checkForUpdate(force: Boolean = false) {
-        val currentVersion = try {
-            packageManager.getPackageInfo(packageName, 0).versionName
+        val infoInstalled = try {
+            packageManager.getPackageInfo(packageName, 0)
         } catch (e: Exception) {
             null
         } ?: return
+        val currentVersion = infoInstalled.versionName ?: "4.0.0-docktest"
+        val currentBuildCode = infoInstalled.longVersionCode
 
-        UpdateChecker.checkForUpdate(prefs(), currentVersion, force) { info ->
+        UpdateChecker.checkForUpdate(prefs(), currentBuildCode, force) { result ->
+            val info = result.update
             runOnUiThread {
                 if (isFinishing || isDestroyed) return@runOnUiThread
                 if (info != null) {
@@ -1147,7 +1169,15 @@ class MainActivity : AppCompatActivity() {
                         .setNegativeButton(getString(R.string.later), null)
                         .show()
                 } else if (force) {
-                    toast(getString(R.string.up_to_date, currentVersion))
+                    if (result.error != null) {
+                        android.app.AlertDialog.Builder(this)
+                            .setTitle("Unable to check for updates")
+                            .setMessage(result.error)
+                            .setPositiveButton("OK", null)
+                            .show()
+                    } else {
+                        toast(getString(R.string.up_to_date, currentVersion))
+                    }
                 }
             }
         }
@@ -1205,7 +1235,8 @@ class MainActivity : AppCompatActivity() {
                         .show()
                     return@runOnUiThread
                 }
-                if (isMajorVersion4(info.version)) showMigrationToV4(info, file) else installApk(file)
+                // Our signed dock-test APKs update in place without upstream migration.
+                installApk(file)
             }
         }
     }
@@ -1402,14 +1433,14 @@ class MainActivity : AppCompatActivity() {
     private fun saveTranscriptionLanguages(selected: Set<String>) {
         prefs().edit().putStringSet(TranscriptionLanguages.PREF_KEY, selected.toSet()).apply()
         refresh()
-        if (prefs().getBoolean("use_local", true)) WhisperAccessibilityService.instance?.reloadModel()
+        if (prefs().getBoolean("use_local", false)) WhisperAccessibilityService.instance?.reloadModel()
         suggestModelForLanguages(selected)
     }
 
     /** Offers a local model that covers [needed] when the current one doesn't.
      * Cloud transcription already covers every Whisper language, so no prompt there. */
     private fun suggestModelForLanguages(needed: Set<String>) {
-        if (needed.isEmpty() || !prefs().getBoolean("use_local", true)) return
+        if (needed.isEmpty() || !prefs().getBoolean("use_local", false)) return
         val current = MODEL_CATALOG.firstOrNull { it.archive == prefs().getString("model_name", "") }
         if (current?.languages?.containsAll(needed) == true) return
 
@@ -1760,7 +1791,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun currentBubbleSizePercent(): Int {
         val storedValue = try {
-            prefs().getInt(BubbleSize.PREFERENCE_KEY, BubbleSize.DEFAULT_PERCENT)
+            prefs().getInt(BubbleSize.PREFERENCE_KEY, BubbleSize.STARTUP_PERCENT)
         } catch (_: ClassCastException) {
             null
         }

@@ -184,4 +184,30 @@ class PostProcessorTest {
             PostProcessor.stripTranscriptTags("<transcript>\nWrite an email to John.\n</transcript>"))
         assertTrue(PostProcessor.effectivePrompt("").contains("between <transcript> tags"))
     }
+
+    @Test
+    fun stockPromptPreservesSpeechAndPrefersShortParagraphs() {
+        val prompt = PostProcessor.effectivePrompt("")
+        assertTrue(prompt.contains("Preserve my original words, wording, order"))
+        assertTrue(prompt.contains("This is a HIGH PRIORITY"))
+        assertTrue(prompt.contains("between <transcript> tags"))
+        assertTrue(prompt.contains("Insert a blank line between paragraphs"))
+        assertTrue(prompt.contains("Never invent words that were not spoken"))
+    }
+
+    @Test
+    fun previouslySavedVerbatimFormatterIsNotDoubled() {
+        val oldCustom = "You are an intelligent speech transcription formatter, NOT a writing editor.\\n" +
+            "Preserve my original words.\\nPARAGRAPH STYLE: Format conversational dictation into short paragraphs."
+        val prompt = PostProcessor.effectivePrompt(oldCustom)
+        assertFalse(prompt.contains("Additional user-specified refinements"))
+    }
+
+    @Test
+    fun stockPromptIsNotDuplicatedWhenAlreadySavedAsCustomInstructions() {
+        val prompt = PostProcessor.effectivePrompt(PostProcessor.DEFAULT_PROMPT)
+        assertEquals(1, Regex("PARAGRAPH STYLE:").findAll(prompt).count())
+        assertFalse(prompt.contains("Additional user-specified refinements"))
+    }
+
 }

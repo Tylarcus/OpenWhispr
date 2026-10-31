@@ -37,4 +37,19 @@ class UpdateCheckerTest {
     @Test fun `missing checksum is never a match`() {
         assertFalse(UpdateChecker.checksumMatches(null, hex))
     }
+
+    @Test fun `recognizes only signed main-build release tags`() {
+        assertEquals(24, UpdateChecker.dockBuildNumber("gboard-dock-main-24"))
+        assertNull(UpdateChecker.dockBuildNumber("gboard-dock-v9-check-22"))
+        assertNull(UpdateChecker.dockBuildNumber("v4.0.0"))
+        assertNull(UpdateChecker.dockBuildNumber("gboard-dock-main-nope"))
+    }
+
+    @Test fun `compares release run number against installed version code`() {
+        assertTrue(UpdateChecker.isNewerDockBuild("gboard-dock-main-24", 40023L))
+        assertFalse(UpdateChecker.isNewerDockBuild("gboard-dock-main-23", 40023L))
+        assertFalse(UpdateChecker.isNewerDockBuild("gboard-dock-main-22", 40023L))
+        assertFalse(UpdateChecker.isNewerDockBuild("gboard-dock-v8-test", 40023L))
+    }
+
 }
