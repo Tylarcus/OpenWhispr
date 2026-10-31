@@ -449,13 +449,14 @@ class MainActivity : AppCompatActivity() {
         bubbleSizePanel.addView(rangeCaption)
         settingsContainer.addView(bubbleSizePanel)
 
+
         settingsContainer.addView(sectionHeader("Microphone positions"))
         settingsContainer.addView(TextView(this).apply {
-            text = "Your normal Gboard and keyboard-closed dictation positions are preserved. " +
-                "Drag in a setup preview and tap Save & lock to protect each location from accidental moves. " +
-                "You can unlock later."
-            textSize = 14f
-            setPadding(dp(24), dp(6), dp(24), dp(10))
+            text = "Each position is used in a different situation. Set only the locations " +
+                "you want, or make positions 2–4 follow position 1. Your saved locations " +
+                "and choices are kept when you update."
+            textSize = 13f
+            setPadding(dp(24), dp(4), dp(24), dp(12))
             setTextColor(attrColor(android.R.attr.textColorSecondary))
         })
         val positionsLockedSwitch = MaterialSwitch(this).apply {
@@ -465,7 +466,7 @@ class MainActivity : AppCompatActivity() {
         settingsContainer.addView(group().apply {
             addView(settingsRow(
                 "Lock microphone positions",
-                "Prevent accidental dragging. Tapping still starts and stops dictation.",
+                "Prevent accidental repositioning. Tap to dictate; drag to Close still works.",
                 positionsLockedSwitch
             ) {
                 val locked = !positionsLockedSwitch.isChecked
@@ -474,7 +475,32 @@ class MainActivity : AppCompatActivity() {
             })
         })
         val markLocked = { positionsLockedSwitch.isChecked = true }
-        // Secondary homes can follow position 1 dynamically or stay independently saved.
+
+        // Compact per-position cards: purpose -> set location -> optional link.
+        // These use the existing keys and modes; no migration of saved locations.
+        fun positionHeading(title: String, explanation: String): LinearLayout =
+            vertical(0).apply {
+                addView(TextView(this@MainActivity).apply {
+                    text = title
+                    textSize = 15f
+                    setTypeface(typeface, Typeface.BOLD)
+                    setTextColor(attrColor(androidx.appcompat.R.attr.colorPrimary))
+                    setPadding(dp(24), dp(18), dp(24), dp(4))
+                })
+                addView(TextView(this@MainActivity).apply {
+                    text = explanation
+                    textSize = 13f
+                    setTextColor(attrColor(android.R.attr.textColorSecondary))
+                    setPadding(dp(24), 0, dp(24), dp(6))
+                })
+            }
+        fun positionDivider(): View = View(this).apply {
+            val tint = attrColor(android.R.attr.textColorSecondary)
+            setBackgroundColor((0x30000000 or (tint and 0x00FFFFFF)))
+            layoutParams = LinearLayout.LayoutParams(LP_MATCH, dp(1)).apply {
+                setMargins(dp(24), 0, dp(24), 0)
+            }
+        }
         fun sameAsPositionOneRow(number: Int): LinearLayout {
             val key = "position_${number}_same_as_1"
             val toggle = MaterialSwitch(this).apply {
@@ -482,8 +508,8 @@ class MainActivity : AppCompatActivity() {
                 isClickable = false
             }
             return settingsRow(
-                "Position $number — same as position 1",
-                "Follow position 1 automatically. Turn off to use its independent saved location.",
+                "Same as position 1",
+                "Follow position 1 automatically. Turn off to use a separately saved position.",
                 toggle
             ) {
                 val linked = !toggle.isChecked
@@ -492,37 +518,54 @@ class MainActivity : AppCompatActivity() {
                 WhisperAccessibilityService.instance?.refreshPositionPreferences()
             }
         }
+
         settingsContainer.addView(group().apply {
+            addView(positionHeading(
+                "POSITION 1  ·  KEYBOARD OPEN",
+                "When you first open Gboard and are not dictating. " +
+                    "Example: the mic beside Gboard's own microphone."
+            ))
             addView(settingsRow(
-                "Set keyboard-open position",
-                "Open a test text box, drag the microphone anywhere, then save."
+                "Set position 1",
+                "Open a test text field, drag the mic into place, then Save & lock."
             ) { promptPlacementCalibration(MicrophoneMode.KEYBOARD, markLocked) })
-            addView(settingsRow(
-                "Set keyboard-closed position",
-                "Drag a floating preview without needing to start a recording."
-            ) { promptPlacementCalibration(MicrophoneMode.FLOATING, markLocked) })
-            addView(sameAsPositionOneRow(2))
-            addView(settingsRow(
-                "Set position 3 — recording / suggestions",
-                "Choose where the microphone sits while recording or when selected for typing."
-            ) { promptPlacementCalibration(MicrophoneMode.RECORDING_DOCK, markLocked) })
-            addView(sameAsPositionOneRow(3))
-            addView(settingsRow(
-                "Set position 4 — typing only",
-                "Optional independent spot while typing, without dictation."
-            ) { promptPlacementCalibration(MicrophoneMode.TYPING_DOCK, markLocked) })
-            addView(sameAsPositionOneRow(4))
         })
+
+        settingsContainer.addView(group().apply {
+            addView(positionHeading(
+                "POSITION 2  ·  DICTATING, KEYBOARD CLOSED",
+                "Only while actively dictating with Gboard closed. The microphone " +
+                    "does not stay floating on your screen when idle."
+            ))
+            addView(settingsRow(
+                "Set position 2",
+                "Choose where the floating mic appears while recording without Gboard."
+            ) { promptPlacementCalibration(MicrophoneMode.FLOATING, markLocked) })
+            addView(positionDivider())
+            addView(sameAsPositionOneRow(2))
+        })
+
         val recordingDockSwitch = MaterialSwitch(this).apply {
             isChecked = prefs().getBoolean("recording_dock_enabled", true)
             isClickable = false
         }
         settingsContainer.addView(group().apply {
+            addView(positionHeading(
+                "POSITION 3  ·  DICTATING, KEYBOARD OPEN",
+                "Used while actively recording with Gboard open. " +
+                    "Put the mic where it will not block suggested words or controls."
+            ))
+            addView(settingsRow(
+                "Set position 3",
+                "Open the test keyboard and place the mic for active dictation."
+            ) { promptPlacementCalibration(MicrophoneMode.RECORDING_DOCK, markLocked) })
+            addView(positionDivider())
+            addView(sameAsPositionOneRow(3))
+            addView(positionDivider())
             addView(settingsRow(
                 "Use position 3 while dictating",
-                "Optional: keyboard open + recording → position 3. " +
-                    "Keyboard closed + recording → position 2. " +
-                    "Stop recording → position 1 unless suggestions are active.",
+                "On: use position 3 while recording with Gboard open. " +
+                    "Keyboard closed still uses position 2.",
                 recordingDockSwitch
             ) {
                 val enabled = !recordingDockSwitch.isChecked
@@ -536,21 +579,6 @@ class MainActivity : AppCompatActivity() {
             isChecked = prefs().getBoolean("suggestions_dock_enabled", true)
             isClickable = false
         }
-        settingsContainer.addView(group().apply {
-            addView(settingsRow(
-                "Move away from Gboard suggestions (experimental)",
-                "Optional typing detection for Gboard word suggestions. Choose below " +
-                    "whether typing should hide the mic or move it to position 3 or 4. " +
-                    "When Gboard hides its suggestions from accessibility, " +
-                    "we keep the chosen typing behavior until the keyboard closes.",
-                suggestionsSwitch
-            ) {
-                val enabled = !suggestionsSwitch.isChecked
-                suggestionsSwitch.isChecked = enabled
-                prefs().edit().putBoolean("suggestions_dock_enabled", enabled).apply()
-                WhisperAccessibilityService.instance?.refreshPositionPreferences()
-            })
-        })
         val typingActionNames = arrayOf(
             "Hide microphone while typing",
             "Move microphone to Position 3",
@@ -562,7 +590,7 @@ class MainActivity : AppCompatActivity() {
         ).coerceAtLeast(0)
         var typingBehaviorRowSubtitle: TextView? = null
         val typingBehaviorRow = settingsRow(
-            "When typing without dictation · tap to choose",
+            "When typing without dictation",
             typingActionNames[typingActionIndex()],
             widget = TextView(this).apply {
                 text = "▾"
@@ -582,9 +610,35 @@ class MainActivity : AppCompatActivity() {
                 .setNegativeButton("Cancel", null)
                 .show()
         }
-        // Subtitle can be updated immediately without rebuilding the settings screen.
         typingBehaviorRowSubtitle = typingBehaviorRow.findViewWithTag("subtitle")
-        settingsContainer.addView(group().apply { addView(typingBehaviorRow) })
+
+        settingsContainer.addView(group().apply {
+            addView(positionHeading(
+                "POSITION 4  ·  TYPING ONLY, NO DICTATION",
+                "Optional spot for the mic while you type normally. " +
+                    "If you prefer no mic while typing, choose Hide below."
+            ))
+            addView(settingsRow(
+                "Set position 4",
+                "Choose a separate location only if you want the mic visible while typing."
+            ) { promptPlacementCalibration(MicrophoneMode.TYPING_DOCK, markLocked) })
+            addView(positionDivider())
+            addView(sameAsPositionOneRow(4))
+            addView(positionDivider())
+            addView(settingsRow(
+                "Detect Gboard typing (experimental)",
+                "When you type without dictating, apply the Hide or Move choice below. " +
+                    "Gboard does not always report suggestions reliably.",
+                suggestionsSwitch
+            ) {
+                val enabled = !suggestionsSwitch.isChecked
+                suggestionsSwitch.isChecked = enabled
+                prefs().edit().putBoolean("suggestions_dock_enabled", enabled).apply()
+                WhisperAccessibilityService.instance?.refreshPositionPreferences()
+            })
+            addView(positionDivider())
+            addView(typingBehaviorRow)
+        })
 
         settingsContainer.addView(sectionHeader("Numeric and PIN keypads"))
         settingsContainer.addView(TextView(this).apply {
@@ -1047,7 +1101,7 @@ class MainActivity : AppCompatActivity() {
 
         val customInstructions = prefs().getString("custom_instructions", "") ?: ""
         customInstructionsRowSub.text = if (customInstructions.isBlank())
-            "Speech-preserving formatting and short paragraphs are enabled. Tap for optional refinements."
+            getString(R.string.tap_add_refinements)
         else
             customInstructions.replace("\n", " ")
 
@@ -1823,10 +1877,10 @@ class MainActivity : AppCompatActivity() {
             return
         }
         val modeTitle = when (mode) {
-            MicrophoneMode.KEYBOARD -> "Keyboard-open location"
-            MicrophoneMode.FLOATING -> "Keyboard-closed location"
-            MicrophoneMode.RECORDING_DOCK -> "Keyboard busy / recording"
-            MicrophoneMode.TYPING_DOCK -> "Position 4 — typing"
+            MicrophoneMode.KEYBOARD -> "Position 1 — keyboard open, not dictating"
+            MicrophoneMode.FLOATING -> "Position 2 — dictating, keyboard closed"
+            MicrophoneMode.RECORDING_DOCK -> "Position 3 — dictating, keyboard open"
+            MicrophoneMode.TYPING_DOCK -> "Position 4 — typing only, no dictation"
         }
         val title = if (layout == KeyboardLayoutProfile.NUMBER)
             "Number pad: $modeTitle" else modeTitle
@@ -1837,19 +1891,20 @@ class MainActivity : AppCompatActivity() {
         panel.addView(TextView(this).apply {
             text = when (mode) {
                 MicrophoneMode.FLOATING ->
-                    "Drag the floating microphone to its preferred position. " +
-                    "It will still hide when you're not dictating and the keyboard is closed."
+                    "Position 2 is shown only during active dictation with the keyboard closed. " +
+                    "Drag the floating microphone to where you want it, then Save & lock. " +
+                    "It stays hidden when you are not dictating."
                 MicrophoneMode.RECORDING_DOCK ->
-                    "This position is used while dictating with Gboard open OR when " +
-                    "suggestions are detected (if enabled). Tap the test field, drag the mic " +
-                    "away from suggestions or over Google's microphone, then Save & lock."
+                    "Position 3 is for active dictation while Gboard is open. " +
+                    "Tap the test field, drag the mic away from word suggestions " +
+                    "and other controls, then Save & lock."
                 MicrophoneMode.KEYBOARD ->
                     "Tap the test field to open Gboard. Move the microphone to your preferred " +
                     "keyboard-open position—even above the keyboard—then tap Save & lock."
                 MicrophoneMode.TYPING_DOCK ->
-                    "This fourth position is only used when suggestions/typing are detected " +
-                    "and you've selected Position 4. Tap the test field, drag the microphone " +
-                    "anywhere, then Save & lock."
+                    "Position 4 is an optional location while typing but NOT dictating. " +
+                    "Enable typing detection and choose Move to position 4 to use it. " +
+                    "Otherwise the microphone can simply hide while you type."
             }
             textSize = 14f
             setPadding(0, 0, 0, dp(12))
