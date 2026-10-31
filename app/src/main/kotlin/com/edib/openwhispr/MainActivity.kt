@@ -459,6 +459,12 @@ class MainActivity : AppCompatActivity() {
             setPadding(dp(24), dp(4), dp(24), dp(12))
             setTextColor(attrColor(android.R.attr.textColorSecondary))
         })
+        settingsContainer.addView(group().apply {
+            addView(settingsRow(
+                "See position examples",
+                "Simple illustrations of positions 1, 2 and 3, with the keyboard open or closed."
+            ) { showPositionExamples() })
+        })
         val positionsLockedSwitch = MaterialSwitch(this).apply {
             isChecked = prefs().getBoolean("positions_locked", true)
             isClickable = false
@@ -1864,6 +1870,90 @@ class MainActivity : AppCompatActivity() {
         larger = getString(R.string.bubble_larger_accessibility),
         percentUnit = getString(R.string.percent_unit),
     )
+    /** Anonymous schematic examples, deliberately not using the owner's private
+     * chat screenshots as assets in this public repository. */
+    private fun showPositionExamples() {
+        val content = vertical(0, dp(4))
+        fun example(title: String, explanation: String, keyboardOpen: Boolean, micOverKeyboard: Boolean) {
+            content.addView(TextView(this).apply {
+                text = title
+                textSize = 16f
+                setTypeface(typeface, Typeface.BOLD)
+                setTextColor(attrColor(android.R.attr.textColorPrimary))
+                setPadding(0, dp(12), 0, dp(4))
+            })
+            content.addView(TextView(this).apply {
+                text = explanation
+                textSize = 13f
+                setTextColor(attrColor(android.R.attr.textColorSecondary))
+                setPadding(0, 0, 0, dp(8))
+            })
+            val mock = FrameLayout(this).apply {
+                background = GradientDrawable().apply {
+                    cornerRadius = dp(14).toFloat()
+                    setColor(0xFF292830.toInt())
+                }
+                layoutParams = LinearLayout.LayoutParams(LP_MATCH, dp(100))
+            }
+            mock.addView(TextView(this).apply {
+                text = "Message field"
+                textSize = 12f
+                setTextColor(0xFFB7B4C5.toInt())
+                setPadding(dp(14), dp(14), 0, 0)
+            }, FrameLayout.LayoutParams(LP_MATCH, dp(42), Gravity.TOP))
+            if (keyboardOpen) {
+                mock.addView(TextView(this).apply {
+                    text = "▦     Clipboard       GIF                Gboard"
+                    textSize = 11f
+                    setTextColor(0xFFE0DEEB.toInt())
+                    gravity = Gravity.CENTER_VERTICAL
+                    setPadding(dp(10), 0, dp(10), 0)
+                    background = GradientDrawable().apply {
+                        cornerRadius = dp(8).toFloat()
+                        setColor(0xFF484650.toInt())
+                    }
+                }, FrameLayout.LayoutParams(LP_MATCH, dp(36), Gravity.BOTTOM))
+            }
+            mock.addView(TextView(this).apply {
+                text = "MIC"
+                textSize = 10f
+                gravity = Gravity.CENTER
+                setTypeface(typeface, Typeface.BOLD)
+                setTextColor(Color.WHITE)
+                background = GradientDrawable().apply {
+                    shape = GradientDrawable.OVAL
+                    setColor(0xFF292830.toInt())
+                    setStroke(dp(2), 0xFFE96C78.toInt())
+                }
+                contentDescription = "Illustration of the microphone position"
+            }, FrameLayout.LayoutParams(dp(42), dp(42), Gravity.END or Gravity.BOTTOM).apply {
+                marginEnd = if (micOverKeyboard) dp(66) else dp(16)
+                bottomMargin = if (!keyboardOpen) dp(16) else if (micOverKeyboard) dp(24) else dp(40)
+            })
+            content.addView(mock)
+        }
+        example(
+            "Position 1 — keyboard opened",
+            "The idle microphone near Gboard's toolbar, as in your first example.",
+            keyboardOpen = true, micOverKeyboard = true
+        )
+        example(
+            "Position 2 — keyboard closed, actively dictating",
+            "The microphone floats over the app only while recording.",
+            keyboardOpen = false, micOverKeyboard = false
+        )
+        example(
+            "Position 3 — keyboard open, actively dictating",
+            "A separate microphone location when you record with Gboard visible.",
+            keyboardOpen = true, micOverKeyboard = false
+        )
+        android.app.AlertDialog.Builder(this)
+            .setTitle("Where the microphone goes")
+            .setView(scrollableDialogContent(content))
+            .setPositiveButton("Done", null)
+            .show()
+    }
+
     /** Guided real-keyboard placement; the overlay remains above this dialog.
      * Calibration state is temporary, and V4's saved coordinates are preserved. */
     private fun promptPlacementCalibration(
