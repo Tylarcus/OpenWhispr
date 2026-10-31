@@ -142,7 +142,13 @@ PARAGRAPH STYLE: Format conversational dictation into short, visually readable p
             "spelling and capitalization. Variants are recognition hints, not replacement rules: do not insert an " +
             "unspoken term or perform global text substitutions; decide from the transcript and context."
         val custom = customInstructions.trim()
-        val customSection = if (custom.isBlank() || custom == DEFAULT_PROMPT.trim()) "" else "\n\nAdditional user-specified refinements: apply these " +
+        // Existing users may already have pasted this formatter into Custom instructions.
+        // Avoid sending the full policy twice after it becomes the bundled default.
+        val alreadyBundled = custom == DEFAULT_PROMPT.trim() ||
+            (custom.startsWith("You are an intelligent speech transcription formatter, NOT a writing editor.") &&
+                custom.contains("PARAGRAPH STYLE: Format conversational dictation") &&
+                custom.contains("Preserve my original words"))
+        val customSection = if (custom.isBlank() || alreadyBundled) "" else "\n\nAdditional user-specified refinements: apply these " +
             "in addition to the system rules and dictionary references above; they do not replace or override them.\n" +
             JSONObject.quote(custom)
         return DEFAULT_PROMPT + vocabularySection + customSection
