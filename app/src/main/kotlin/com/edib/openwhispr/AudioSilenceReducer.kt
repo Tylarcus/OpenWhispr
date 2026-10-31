@@ -49,9 +49,10 @@ object AudioSilenceReducer {
             val mean = if (count > 0) sum.toFloat() / count else 0f
             active[f] = peak >= MIN_VOICE_PEAK || mean >= MIN_VOICE_MEAN_ABS
         }
-        if (active.none { it }) {
-            // Entire recording looks quiet, even if one sample triggered the
-            // old global peak check. Do not ask Whisper to invent words for it.
+        // A few isolated loud frames are commonly handling noise or clicks,
+        // not speech. Do not send a near-silent recording to Whisper based on
+        // one 20ms spike (the old global-peak test allowed exactly that).
+        if (active.count { it } < 4) {
             return Result(ByteArray(0), false, pcm.size * 1000 / (SAMPLE_RATE * 2))
         }
 
