@@ -1009,9 +1009,11 @@ class WhisperAccessibilityService : AccessibilityService() {
         val inside = isDismissZone(rawX, rawY)
         if (inside == isInsideDismissZone) return
         isInsideDismissZone = inside
+        // Do not scale this View beyond its TYPE_ACCESSIBILITY_OVERLAY window.
+        // The old 1.16x hover scale was clipped by Android's fixed 76dp window,
+        // causing the red circular target to show flattened/cut-off edges.
+        // Alpha still confirms when the microphone reaches the Close zone.
         target.alpha = if (inside) 1f else 0.62f
-        target.scaleX = if (inside) 1.16f else 1f
-        target.scaleY = if (inside) 1.16f else 1f
     }
 
     private fun removeDismissTarget() {
