@@ -93,6 +93,8 @@ class WhisperAccessibilityService : AccessibilityService() {
         }
     }
 
+    // Audio duration for last completed recording (no network/AI latency).
+    private var lastRecordingDurationMs = 0L
     private var state = State.IDLE
     private var overlayView: FrameLayout? = null
     private var overlayShown = false
@@ -1416,6 +1418,7 @@ class WhisperAccessibilityService : AccessibilityService() {
 
         val pcm = pcmStream?.toByteArray() ?: ByteArray(0)
         pcmStream = null
+        lastRecordingDurationMs = pcm.size.toLong() * 1000L / (SAMPLE_RATE * 2L)
 
         if (pcm.isEmpty() || peakAmplitude(pcm) < SILENCE_PEAK) { reset(getString(R.string.no_audio_captured)); return }
 
@@ -1525,6 +1528,10 @@ class WhisperAccessibilityService : AccessibilityService() {
             }
             return
         }
+
+        // Privacy: store only aggregate word count and captured audio duration.
+        // Count the raw transcript once, before cleanup or voice commands.
+        DictationStats.record(this, text, lastRecordingDurationMs)
 
         // Close-target dismissal always copies the raw recognized transcript,
         // never executes commands, edits an app, or injects text.
