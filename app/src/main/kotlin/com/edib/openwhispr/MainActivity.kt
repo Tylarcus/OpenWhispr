@@ -65,6 +65,11 @@ class MainActivity : AppCompatActivity() {
     private lateinit var statusContainer: LinearLayout
     private lateinit var dictationContainer: LinearLayout
     private lateinit var settingsContainer: LinearLayout
+    private lateinit var insightsContainer: LinearLayout
+    private lateinit var wordsStat: TextView
+    private lateinit var todayStat: TextView
+    private lateinit var wpmStat: TextView
+    private lateinit var lastStat: TextView
 
     private val modelRows = mutableMapOf<String, ModelRowViews>()
     private var batteryWarningShown = false
@@ -128,7 +133,8 @@ class MainActivity : AppCompatActivity() {
 
         // Default to checking this fork's signed releases at most every 12 hours.
         // Existing user choices are preserved, and the switch can turn it off.
-        if (prefs().getBoolean("auto_update_check", true)) checkForUpdate()
+        // Beta is a different Android package. Never offer it a stable APK update.
+        if (!isRedesignBeta() && prefs().getBoolean("auto_update_check", true)) checkForUpdate()
 
         val outer = vertical(0, 0)
 
@@ -139,20 +145,26 @@ class MainActivity : AppCompatActivity() {
             gravity = Gravity.CENTER_VERTICAL
             // [ui] Less empty space above the title (was 64dp top).
             setPadding(dp(24), dp(40), dp(24), dp(24))
+            background = GradientDrawable(GradientDrawable.Orientation.LEFT_RIGHT,
+                intArrayOf(Color.parseColor("#622BCF"), Color.parseColor("#BC309E"), Color.parseColor("#FF5263"))).apply {
+                cornerRadius = dp(22).toFloat()
+            }
         }
         header.addView(ImageView(this).apply {
             setImageResource(R.mipmap.ic_launcher)
             layoutParams = LinearLayout.LayoutParams(dp(40), dp(40)).apply { marginEnd = dp(12) }
         })
         header.addView(TextView(this).apply {
-            text = "OpenWispr"
-            textSize = 32f
+            text = "OpenWispr BETA"
+            textSize = 28f
+            setTextColor(Color.WHITE)
         })
         outer.addView(header)
 
         tabLayout = TabLayout(this).apply {
-            addTab(newTab().setText(getString(R.string.tab_status)))
+            addTab(newTab().setText("Home"))
             addTab(newTab().setText(getString(R.string.tab_dictation)))
+            addTab(newTab().setText(getString(R.string.tab_insights)))
             addTab(newTab().setText(getString(R.string.tab_settings)))
             addOnTabSelectedListener(object : TabLayout.OnTabSelectedListener {
                 override fun onTabSelected(tab: TabLayout.Tab) { showTab(tab.position) }
@@ -167,10 +179,19 @@ class MainActivity : AppCompatActivity() {
         statusContainer = vertical(0).apply { setPadding(0, dp(16), 0, 0) }
         dictationContainer = vertical(0)
         settingsContainer = vertical(0)
+        insightsContainer = vertical(0)
 
         // [ui] Each section's rows sit on a rounded panel (see group()).
         // Rows, handlers and the references refresh() uses are unchanged;
         // only the parent they're added to is.
+
+        // ================= New beta home tab =================
+        statusContainer.addView(TextView(this).apply {
+            text = "Your voice, wherever you type."
+            textSize = 19f
+            setTypeface(typeface, Typeface.BOLD)
+            setPadding(dp(24), dp(16), dp(24), dp(10))
+        })
 
         // ================= Status tab =================
 
@@ -846,8 +867,9 @@ class MainActivity : AppCompatActivity() {
             }
         })
 
-        aboutGroup.addView(settingsRow(getString(R.string.check_updates), getString(R.string.about_current_version, versionName)) {
-            checkForUpdate(force = true)
+        aboutGroup.addView(settingsRow("Beta downloads", "Redesign betas are published separately on GitHub") {
+            if (isRedesignBeta()) startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://github.com/Tylarcus/OpenWhispr/releases")))
+            else checkForUpdate(force = true)
         })
 
         // Automatic update checks are on by default; users can switch them off.
@@ -872,10 +894,52 @@ class MainActivity : AppCompatActivity() {
         }
         autoUpdateRowSub = autoUpdateRow.findViewWithTag("subtitle")
         aboutGroup.addView(autoUpdateRow)
+        if (isRedesignBeta()) autoUpdateRow.visibility = View.GONE
         settingsContainer.addView(aboutGroup)
+
+        // Experimental Insights screen. Word comparisons will be enabled
+        // only after the milestone list has been reviewed.
+        insightsContainer.addView(sectionHeader("Your voice, in numbers"))
+        val statsGroup = group()
+        val wordsRow = settingsRow("Total words", "Words transcribed since installing this beta")
+        wordsStat = wordsRow.findViewWithTag("subtitle")
+        statsGroup.addView(wordsRow)
+        val todayRow = settingsRow("Today", "Words spoken today")
+        todayStat = todayRow.findViewWithTag("subtitle")
+        statsGroup.addView(todayRow)
+        val paceRow = settingsRow("Average speaking pace", "Time recorded, excluding model processing")
+        wpmStat = paceRow.findViewWithTag("subtitle")
+        statsGroup.addView(paceRow)
+        val lastRow = settingsRow("Latest dictation", "Most recent recording")
+        lastStat = lastRow.findViewWithTag("subtitle")
+        statsGroup.addView(lastRow)
+        insightsContainer.addView(statsGroup)
+        insightsContainer.addView(sectionHeader("Word comparisons"))
+        insightsContainer.addView(group().apply {
+            addView(settingsRow("Milestones under review", "Fun word-length comparisons are waiting for your approval."))
+        })
+        insightsContainer.addView(TextView(this).apply {
+            text = "These counters stay on your phone. Your recordings and transcripts are not saved by Insights."
+            textSize = 13f
+            setPadding(dp(26), dp(12), dp(26), dp(16))
+        })
+        insightsContainer.addView(group().apply {
+            addView(settingsRow("Reset statistics", "Clear this beta's locally stored word counters") {
+                android.app.AlertDialog.Builder(this@MainActivity)
+                    .setTitle("Reset word statistics?")
+                    .setMessage("This erases the beta's word, time, and pace totals.")
+                    .setNegativeButton(R.string.cancel, null)
+                    .setPositiveButton("Reset") { _, _ ->
+                        DictationStats.reset(this@MainActivity)
+                        refreshInsights()
+                    }
+                    .show()
+            })
+        })
 
         outer.addView(statusContainer)
         outer.addView(dictationContainer)
+        outer.addView(insightsContainer)
         outer.addView(settingsContainer)
         showTab(0)
 
@@ -891,15 +955,30 @@ class MainActivity : AppCompatActivity() {
         refresh()
     }
 
-    override fun onResume() { super.onResume(); refresh() }
+    override fun onResume() { super.onResume(); refresh(); refreshInsights() }
     override fun onRequestPermissionsResult(c: Int, p: Array<String>, r: IntArray) {
         super.onRequestPermissionsResult(c, p, r); refresh()
+    }
+
+    private fun isRedesignBeta() = packageName.endsWith(".redesignbeta")
+
+    private fun refreshInsights() {
+        if (!::wordsStat.isInitialized) return
+        val s = DictationStats.snapshot(this)
+        wordsStat.text = "%,d words in %,d dictations".format(s.totalWords, s.dictations)
+        todayStat.text = "%,d words today".format(s.todayWords)
+        wpmStat.text = if (s.recordingMs == 0L) "Dictate something to begin"
+            else "%d WPM over %.1f recorded minutes".format(s.averageWpm, s.recordingMs / 60000.0)
+        lastStat.text = if (s.lastWords == 0) "No dictations yet"
+            else s.lastWords.toString() + " words · " + s.lastWpm.toString() + " WPM"
     }
 
     private fun showTab(index: Int) {
         statusContainer.visibility = if (index == 0) View.VISIBLE else View.GONE
         dictationContainer.visibility = if (index == 1) View.VISIBLE else View.GONE
-        settingsContainer.visibility = if (index == 2) View.VISIBLE else View.GONE
+        insightsContainer.visibility = if (index == 2) View.VISIBLE else View.GONE
+        settingsContainer.visibility = if (index == 3) View.VISIBLE else View.GONE
+        if (index == 2) refreshInsights()
     }
 
     // --- Model Rows ---
@@ -1136,8 +1215,8 @@ class MainActivity : AppCompatActivity() {
             !audio -> getString(R.string.status_missing_audio) to null
             !acc -> getString(R.string.status_missing_accessibility) to null
             useLocal && !hasModel -> getString(R.string.status_missing_model) to { tabLayout.getTabAt(1)?.select(); Unit }
-            !useLocal && !hasGroqKey -> getString(R.string.status_missing_key) to { tabLayout.getTabAt(2)?.select(); Unit }
-            usePostProcessing && !hasCleanupKey -> getString(R.string.status_missing_cleanup_key) to { tabLayout.getTabAt(2)?.select(); Unit }
+            !useLocal && !hasGroqKey -> getString(R.string.status_missing_key) to { tabLayout.getTabAt(3)?.select(); Unit }
+            usePostProcessing && !hasCleanupKey -> getString(R.string.status_missing_cleanup_key) to { tabLayout.getTabAt(3)?.select(); Unit }
             else -> null to null
         }
         val mode = (if (useLocal) getString(R.string.mode_on_device) else getString(R.string.mode_cloud)) +
@@ -1222,6 +1301,7 @@ class MainActivity : AppCompatActivity() {
      * [force] bypasses the cache interval and always gives feedback, for
      * the manual "Check for updates" row. */
     private fun checkForUpdate(force: Boolean = false) {
+        if (isRedesignBeta()) return // Never install a stable APK into the isolated beta.
         val infoInstalled = try {
             packageManager.getPackageInfo(packageName, 0)
         } catch (e: Exception) {
