@@ -56,8 +56,8 @@ android {
 
     buildTypes {
         debug {
-            applicationIdSuffix = ".docktest"
-            versionNameSuffix = "-docktest"
+            applicationIdSuffix = ".redesignbeta"
+            versionNameSuffix = "-redesign-beta"
             if (dockTestKeyStore.exists()) {
                 signingConfig = signingConfigs.getByName("dockTest")
             }
