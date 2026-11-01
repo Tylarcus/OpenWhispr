@@ -70,6 +70,10 @@ class MainActivity : AppCompatActivity() {
     private lateinit var todayStat: TextView
     private lateinit var wpmStat: TextView
     private lateinit var lastStat: TextView
+    private lateinit var comparisonHeading: TextView
+    private lateinit var comparisonCard: LinearLayout
+    private lateinit var comparisonText: TextView
+    private var selectedInsightsScope = DictationStats.Scope.TODAY
 
     private val modelRows = mutableMapOf<String, ModelRowViews>()
     private var batteryWarningShown = false
@@ -897,37 +901,68 @@ class MainActivity : AppCompatActivity() {
         if (isRedesignBeta()) autoUpdateRow.visibility = View.GONE
         settingsContainer.addView(aboutGroup)
 
-        // Experimental Insights screen. Word comparisons will be enabled
-        // only after the milestone list has been reviewed.
+        // Experimental Insights are ONLY on this tab, while the app is open.
+        // No overlay, toast, alert, notification, timer or milestone progress.
         insightsContainer.addView(sectionHeader("Your voice, in numbers"))
+        val scopeTabs = TabLayout(this).apply {
+            tabMode = TabLayout.MODE_SCROLLABLE
+            tabGravity = TabLayout.GRAVITY_START
+            listOf("Today", "This Week", "Lifetime", "Last").forEach { label ->
+                addTab(newTab().setText(label))
+            }
+            addOnTabSelectedListener(object : TabLayout.OnTabSelectedListener {
+                override fun onTabSelected(tab: TabLayout.Tab) {
+                    selectedInsightsScope = when (tab.position) {
+                        0 -> DictationStats.Scope.TODAY
+                        1 -> DictationStats.Scope.WEEK
+                        2 -> DictationStats.Scope.LIFETIME
+                        else -> DictationStats.Scope.LAST
+                    }
+                    refreshInsights()
+                }
+                override fun onTabUnselected(tab: TabLayout.Tab) {}
+                override fun onTabReselected(tab: TabLayout.Tab) { refreshInsights() }
+            })
+        }
+        insightsContainer.addView(scopeTabs)
+
         val statsGroup = group()
-        val wordsRow = settingsRow("Total words", "Words transcribed since installing this beta")
+        val wordsRow = settingsRow("Words spoken", "No words recorded yet")
         wordsStat = wordsRow.findViewWithTag("subtitle")
         statsGroup.addView(wordsRow)
-        val todayRow = settingsRow("Today", "Words spoken today")
-        todayStat = todayRow.findViewWithTag("subtitle")
-        statsGroup.addView(todayRow)
-        val paceRow = settingsRow("Average speaking pace", "Time recorded, excluding model processing")
+        val sessionsRow = settingsRow("Dictations", "Number of completed recordings")
+        todayStat = sessionsRow.findViewWithTag("subtitle")
+        statsGroup.addView(sessionsRow)
+        val paceRow = settingsRow("Average speaking pace", "Recorded audio time, including pauses")
         wpmStat = paceRow.findViewWithTag("subtitle")
         statsGroup.addView(paceRow)
-        val lastRow = settingsRow("Latest dictation", "Most recent recording")
-        lastStat = lastRow.findViewWithTag("subtitle")
-        statsGroup.addView(lastRow)
+        val durationRow = settingsRow("Recorded time", "Speech capture time only")
+        lastStat = durationRow.findViewWithTag("subtitle")
+        statsGroup.addView(durationRow)
         insightsContainer.addView(statsGroup)
-        insightsContainer.addView(sectionHeader("Word comparisons"))
-        insightsContainer.addView(group().apply {
-            addView(settingsRow("Milestones under review", "Fun word-length comparisons are waiting for your approval."))
-        })
+
+        comparisonHeading = sectionHeader("What does that equal?")
+        insightsContainer.addView(comparisonHeading)
+        comparisonCard = group()
+        comparisonText = TextView(this).apply {
+            textSize = 17f
+            setTextColor(attrColor(android.R.attr.textColorPrimary))
+            setPadding(dp(24), dp(20), dp(24), dp(20))
+        }
+        comparisonCard.addView(comparisonText)
+        insightsContainer.addView(comparisonCard)
+
         insightsContainer.addView(TextView(this).apply {
-            text = "These counters stay on your phone. Your recordings and transcripts are not saved by Insights."
+            text = "Word comparisons appear only here when you open Insights. They never interrupt typing or dictation. Statistics stay on this device."
             textSize = 13f
+            setTextColor(attrColor(android.R.attr.textColorSecondary))
             setPadding(dp(26), dp(12), dp(26), dp(16))
         })
         insightsContainer.addView(group().apply {
-            addView(settingsRow("Reset statistics", "Clear this beta's locally stored word counters") {
+            addView(settingsRow("Reset statistics", "Delete all local word and WPM counters") {
                 android.app.AlertDialog.Builder(this@MainActivity)
                     .setTitle("Reset word statistics?")
-                    .setMessage("This erases the beta's word, time, and pace totals.")
+                    .setMessage("This erases this beta's statistics, not your dictation preferences.")
                     .setNegativeButton(R.string.cancel, null)
                     .setPositiveButton("Reset") { _, _ ->
                         DictationStats.reset(this@MainActivity)
@@ -936,6 +971,25 @@ class MainActivity : AppCompatActivity() {
                     .show()
             })
         })
+
+        // Comparisons are strictly opt-in as an Insights display preference,
+        // while word/WPM counting continues even if comparisons are hidden.
+        settingsContainer.addView(sectionHeader("Insights"))
+        val comparisonsSwitch = MaterialSwitch(this).apply {
+            isChecked = prefs().getBoolean("show_word_comparisons", true)
+            isClickable = false
+        }
+        val comparisonSetting = settingsRow(
+            "Show word comparisons",
+            "Only inside Insights. No popups, notifications or interruptions.",
+            comparisonsSwitch
+        ) {
+            val enabled = !comparisonsSwitch.isChecked
+            comparisonsSwitch.isChecked = enabled
+            prefs().edit().putBoolean("show_word_comparisons", enabled).apply()
+            refreshInsights()
+        }
+        settingsContainer.addView(group().apply { addView(comparisonSetting) })
 
         outer.addView(statusContainer)
         outer.addView(dictationContainer)
@@ -963,14 +1017,22 @@ class MainActivity : AppCompatActivity() {
     private fun isRedesignBeta() = packageName.endsWith(".redesignbeta")
 
     private fun refreshInsights() {
-        if (!::wordsStat.isInitialized) return
+        if (!::wordsStat.isInitialized || !::comparisonText.isInitialized) return
         val s = DictationStats.snapshot(this)
-        wordsStat.text = "%,d words in %,d dictations".format(s.totalWords, s.dictations)
-        todayStat.text = "%,d words today".format(s.todayWords)
-        wpmStat.text = if (s.recordingMs == 0L) "Dictate something to begin"
-            else "%d WPM over %.1f recorded minutes".format(s.averageWpm, s.recordingMs / 60000.0)
-        lastStat.text = if (s.lastWords == 0) "No dictations yet"
-            else s.lastWords.toString() + " words · " + s.lastWpm.toString() + " WPM"
+        val period = s.forScope(selectedInsightsScope)
+        wordsStat.text = "%,d words".format(period.words)
+        todayStat.text = "%,d completed dictations".format(period.dictations)
+        wpmStat.text = if (period.recordingMs == 0L) "No recorded speech in this period"
+            else "%,d WPM (includes natural pauses)".format(period.wpm)
+        val seconds = period.recordingMs / 1000L
+        lastStat.text = "%d min %02d sec".format(seconds / 60L, seconds % 60L)
+
+        // Display updates ONLY on this in-app Insights tab. No automatic
+        // switching, timers, milestone progress or notification banners.
+        comparisonText.text = WordComparisons.description(period.words)
+        val show = prefs().getBoolean("show_word_comparisons", true)
+        comparisonHeading.visibility = if (show) View.VISIBLE else View.GONE
+        comparisonCard.visibility = if (show) View.VISIBLE else View.GONE
     }
 
     private fun showTab(index: Int) {
