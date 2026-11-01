@@ -1,0 +1,21 @@
+name: OpenWhispr Redesign Beta Signed APK
+
+# Register the experimental build in the Actions sidebar. Selecting the
+# feature/redesign-word-stats-beta branch runs the full build-and-release
+# workflow defined on that branch instead. Running this registration file
+# against main cannot build, sign, or publish the stable application.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  branch-instructions:
+    if: github.ref != 'refs/heads/feature/redesign-word-stats-beta'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Select beta branch
+        run: |
+          echo "Choose feature/redesign-word-stats-beta from Run workflow."
+          echo "The beta branch contains the complete signed beta APK workflow."
