@@ -1,7 +1,7 @@
 # OpenWhispr beta — word-comparison editorial review
-**Status: DRAFT — not enabled in the app. User approval required.**
+**Status: USER-APPROVED for in-app Insights only — November 1, 2026.**
 
-These are suggested **lifetime spoken-word milestones**, starting when the separately installed redesign beta begins counting. Each comparison is a playful approximation unless labelled an exact reference. No transcription text or audio is stored by the word counter.
+These are approved **word-count comparisons** for Today, This Week (Monday–Sunday), Lifetime and Last Dictation in the separately installed redesign beta. Each comparison is a playful approximation unless labelled an exact reference. No transcription text or audio is stored by the word counter.
 
 | Words | Display suggestion | Evidence / honesty note |
 |---:|---|---|
@@ -45,12 +45,10 @@ These are suggested **lifetime spoken-word milestones**, starting when the separ
 - *Green Eggs and Ham*: https://library.teachingbooks.net/tb.cgi/tb.cgi?tid=2850
 - *Harry Potter and the Philosopher's Stone*: https://www.hp-lexicon.org/source/the-harry-potter-novels/ps/
 
-## Interaction proposal for later approval
-- No interruptions to dictation. Show a rotating “What does that equal?” card on the Insights tab.
-- Switch between **today**, **lifetime**, and **last dictation** comparisons.
-- Show next milestone progress, and the nearest reached milestone with precise qualifiers.
-- Between milestone thresholds, rotate entertaining comparisons rather than issue constant notifications.
-- User can disable comparison cards, leaving counters intact.
-- All content is curated offline and has no dependencies on external services.
-
-**Do not add any of these user-visible comparison messages to the APK until reviewed.**
+## Approved interaction requirements — November 1, 2026
+- Display ONE comparison card on the **Insights tab** while the app is open. Never show comparison overlays, toast messages, system notifications, or popup interruptions during dictation or typing.
+- Selectable scopes: **Today**, **This Week** (Monday–Sunday), **Lifetime**, **Last Dictation**.
+- Display the approximate comparison matching the most recently reached word-count threshold. No next-milestone progress bars, no milestone notification feed, no intrusive timer rotation.
+- When more comparison variants for the same general threshold are curated and approved, we may rotate them while Insights is visible only. That is NOT part of this initial implementation.
+- Offer a Settings switch to disable the comparison card without deleting word/WPM counters.
+- All comparisons remain bundled and offline. No external services.
